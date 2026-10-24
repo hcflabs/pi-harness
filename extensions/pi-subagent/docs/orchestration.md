@@ -127,7 +127,7 @@ The new tab gets a new agent name and reference. Its record points to the same s
 
 A request can continue each worker only one time, and only from the checkout and Herdr workspace where the worker ran. After a continuation, continue the newest reference. The extension refuses an older reference to the same session, because a later turn follows its own turn.
 
-Before launch, the request fails if the reference is unknown or matches more than one record on this session branch. It also fails if the Role is different or a locally active task still owns the session of the worker. A missing session file or a session file larger than 16 MiB also causes failure. The last session turn for the recorded prompt must be finished.
+Before launch, the request fails if the reference is unknown or matches more than one record on this session branch. It also fails if the Role is different or a locally active task still owns the session of the worker. A missing session file, a session file larger than 16 MiB, or a session file that is not private also causes failure. The recorded prompt must have a Final turn.
 
 If Herdr still lists the old agent, the agent must match the recorded name, pane, tab, workspace, and checkout. It must also be idle or done. The extension never closes a working or blocked agent. The extension closes the old pane, then proves pane absence and two empty lease scans.
 
@@ -141,9 +141,13 @@ If the extension cannot prove termination of the stopped worker, the workflow ke
 
 ### Direct results and records
 
-The extension retrieves each final answer from its exact Pi session file, not its possibly truncated screen. Idle, blocked, unknown, or malformed answers fail with recoverable tab and session identities. No whole-run deadline applies.
+The extension retrieves each final answer from its exact Pi session file, not its possibly truncated screen. The worker session decides completion, not the Herdr agent state. A Herdr `idle` or `done` state only starts a read of the session. A Herdr `blocked` or `unknown` state fails at once. A failed Final turn or a malformed session fails with recoverable tab and session identities. No whole-run deadline applies.
 
-A provider error, such as HTTP 429, can end a worker turn before Pi retries it automatically. When the final turn has `stopReason: "error"`, the extension waits up to 65 seconds for the worker to work again, at most 5 times for one task. The task fails only when Pi does not retry in that time.
+The Final turn is the latest assistant turn on the exact branch of the worker prompt that Pi did not omit. Only a `stop` Final turn is a success. A `length`, `error`, or `aborted` Final turn is a failure, and the failure names the stop reason. A `toolUse` turn, or no Final turn, means that the worker is still running. While the worker is running, the extension keeps waiting. The idle timeout applies, and growth of the session file starts the timeout again. Isolated workers use the same rule.
+
+Pi can retry a turn after a provider error, such as HTTP 429, or recover from a `length` turn. Before the retry, Pi writes a `context_edit` entry that omits the old turn, so the old turn is not the Final turn. Herdr can report the agent done before Pi writes this entry. Thus an `error` Final turn is a failure only when a second read after about 500 ms shows the same turn, still not omitted. A `length` Final turn is a failure unless Pi recovers it.
+
+Each session file must be private: a regular file of the current user with mode `0600`, and 16 MiB or smaller. The extension creates each new session file with mode `0600` before it starts Pi. A session file with group or other access, or a symbolic link, causes failure. Continuation of a session file with a wider mode, for example from an older release, fails. The error gives the file path and the `0600` rule.
 
 The tasks in a request share a 40 KiB inline answer budget. Each worker prompt states its share. A longer exact answer is still a success. The result shows a UTF-8-safe prefix and a truncation marker. The marker gives the path of a private `answer-<turn>.md` file beside the session file, which holds the full answer. For a write task, the budget applies to the `answer` field of the completion object. A chain step receives the full answer of the previous step in `{previous}`; the budget applies only to the result for Main. The result details keep `answerFile` for each full-answer file. Recovery text includes these paths outside the output limit, even when checkout notes remove the inline link.
 

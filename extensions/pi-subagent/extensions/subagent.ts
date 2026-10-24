@@ -13,8 +13,18 @@ import { directRef, registerSubagentCommand, type DirectDisplay, type DirectTask
 import { MODEL_CLASS_GUIDANCE } from "./model-class-policy.ts";
 import { compactCost, compactTokens, ENTRY_STATUS_PRESENTATION, formatWorkflowResult, workerOutputForMain, type BackgroundWorkflowTransportDetails, type WorkflowTransportEntry } from "./result-transport.ts";
 import { checkoutNote, DelegateTaskParameters, identifyWorkflowEntries, parseDelegateTask, runForegroundWorkflow, snapshotCheckout, workflowRepos, writesCheckout, type CheckoutSnapshot, type ParsedWorkflow, type WorkflowEntry } from "./workflow.ts";
-import { assertSettledDirectSession, createDirectHerdr, DirectAllocationError, directTaskReader, type DirectAllocation, type DirectHandle, type DirectTab, type DirectToolActivity, type DirectUsage } from "../dist/direct-herdr.js";
+import { createDirectHerdr, DirectAllocationError, directTaskReader, directTurnPrompt, type DirectAllocation, type DirectHandle, type DirectTab, type DirectToolActivity, type DirectUsage } from "../dist/direct-herdr.js";
 import { materializeTransientLaunch } from "../dist/launch-runtime.js";
+import { readSessionTurn } from "../dist/session-turn.js";
+/** Refuse continuation unless the saved session has a Final turn for the recorded turn and no later user turn. */
+async function assertSettledDirectSession(sessionFile: string, turn: string): Promise<void> {
+	const final = await readSessionTurn(sessionFile, directTurnPrompt(turn));
+	if (final.state === "absent") throw new Error(`Saved Pi session ${sessionFile} is missing or unreadable, or has no recorded prompt`);
+	if (final.state === "running") {
+		throw new Error(`Saved Pi session ${sessionFile} has no terminal final turn for the recorded prompt; the worker may still be running`);
+	}
+}
+
 const WIDGET_KEY = "subagent-status";
 const WIDGET_INTERVAL_MS = 1_000;
 const MAX_WIDGET_ITEMS = 8;

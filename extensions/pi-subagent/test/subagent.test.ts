@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { execFile, execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
@@ -1961,6 +1961,11 @@ test("continueFrom refuses owned, unknown, mismatched, working, unsettled, legac
 			const saved = await readFile(source.sessionFile, "utf8");
 			await writeFile(source.sessionFile, saved.replace('"stopReason":"stop"', '"stopReason":"toolUse"'));
 			await refuse({ continueFrom: "D1.1" }, /no terminal final turn for the recorded prompt/);
+			// A session file from an older release can have a wider mode. Continuation names the file and the 0600 rule.
+			await writeFile(source.sessionFile, saved);
+			await chmod(source.sessionFile, 0o644);
+			await refuse({ continueFrom: "D1.1" }, new RegExp(`${source.sessionFile.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is not private.*mode 0600`));
+			await chmod(source.sessionFile, 0o600);
 			app.sessionEntries.push({ type: "custom", customType: "subagent-direct-tab", data: {
 				...source, turn: undefined, taskId: "legacy", tabId: "t-legacy", display: { ...source.display, workflow: 5 } } });
 			await refuse({ continueFrom: "D5.1" }, /no turn identity .*not continuable/);
@@ -2227,29 +2232,29 @@ test("a direct worker waits for Pi to retry a turn that ended with a provider er
 		await writeWorkerRole(agentDir);
 		await herdrEnvironment(async (cwd) => {
 			const fake = fakeHerdr(cwd, () => "answer after retry");
-			let waits = 0;
-			let lastDone: any;
+			const waits: string[][] = [];
+			const timeout = { code: 1, stdout: JSON.stringify({ error: { code: "timeout" } }), stderr: "" };
 			const exec = async (args: string[]) => {
 				if (args[0] !== "agent" || args[1] !== "wait") return await fake.exec(args);
-				waits += 1;
-				if (waits === 1) {
-					// The first turn ends with HTTP 429. Pi saves it as an error turn, and Herdr reports done.
+				waits.push(args);
+				const start = fake.calls.find(([kind, command]) => kind === "agent" && command === "start")!;
+				const sessionFile = start[start.indexOf("--session") + 1]!;
+				if (waits.length === 1) {
+					// The first turn ends with HTTP 429. Pi saves it as an error turn and omits it before its retry delay.
+					// Herdr reports done during that delay.
 					const response = await fake.exec(args);
-					const start = fake.calls.find(([kind, command]) => kind === "agent" && command === "start")!;
-					const sessionFile = start[start.indexOf("--session") + 1]!;
 					const lines = (await readFile(sessionFile, "utf8")).trimEnd().split("\n").map((line) => JSON.parse(line));
 					lines[2].message = { role: "assistant", content: [], stopReason: "error", errorMessage: "429 rate_limit_error" };
+					lines.push({ type: "context_edit", id: "omit", parentId: "final", targetId: "final", replacement: null });
 					await writeFile(sessionFile, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
-					lastDone = JSON.parse(response.stdout);
 					return response;
 				}
-				if (args.includes("working") && !args.includes("idle")) {
-					// Pi retries after its backoff, so the agent works again.
-					const working = structuredClone(lastDone);
-					working.result.agent.agent_status = "working";
-					return { code: 0, stdout: JSON.stringify(working), stderr: "" };
+				// Herdr stays done while Pi retries. The third wait sees the retried answer.
+				if (waits.length === 3) {
+					await appendFile(sessionFile, `${JSON.stringify({ type: "message", id: "retry", parentId: "omit", message: {
+						role: "assistant", content: [{ type: "text", text: "answer after retry" }], stopReason: "stop" } })}\n`);
 				}
-				return await fake.exec(args);
+				return timeout;
 			};
 			const app = harness({ cwd, herdr: exec });
 			app.handlers.get("session_start")?.({}, app.ctx);
@@ -2257,7 +2262,10 @@ test("a direct worker waits for Pi to retry a turn that ended with a provider er
 			await waitFor(() => app.sentMessages.length === 1, 5_000);
 			const entry = app.sentMessages[0]!.message.details.entries[0];
 			assert.deepEqual([entry.status, entry.summary], ["succeeded", "answer after retry"]);
-			assert.equal(waits, 3);
+			assert.equal(waits.length, 3);
+			for (const args of waits.slice(1)) assert.ok(args.includes("working") && !args.includes("done"), "a done agent waits for other states");
+			const start = fake.calls.find(([kind, command]) => kind === "agent" && command === "start")!;
+			assert.equal((await stat(start[start.indexOf("--session") + 1]!)).mode & 0o777, 0o600);
 		});
 	});
 });

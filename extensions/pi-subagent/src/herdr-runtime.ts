@@ -50,7 +50,7 @@ import {
 import { runProcess as defaultRunProcess } from "./process.ts";
 import { EXECUTION_BUDGET_ENV, type EphemeralSubagentExecutionBudget } from "./ephemeral.ts";
 import { assertPrivateLease, PI_SUBAGENT_PROCESS_LEASE, scanProcessLease } from "./process-lease.ts";
-import { exactDirectTerminalTurn } from "./direct-herdr.ts";
+import { readPrivateSession, readSessionTurn, type SessionTurn } from "./session-turn.ts";
 import { READABLE_BRANCH_PATTERN } from "./worktree.ts";
 
 const MIN_HERDR_VERSION = [0, 9, 3] as const;
@@ -63,7 +63,6 @@ const STALLED_PROMPT_POLL_MS = 250;
 const HOST_LAYOUT_POLL_MS = 50;
 const HOST_LAYOUT_MAX_POLLS = 40;
 const DIAGNOSTIC_LIMIT = 8 * 1024;
-const SESSION_LIMIT = 16 * 1024 * 1024;
 const LEASE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
 const CORRELATION_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,128}$/;
@@ -1071,21 +1070,25 @@ export class HerdrHostRuntime implements HostRuntime {
 				};
 			}
 			if (SETTLED_AGENT_STATES.has(lifecycle.status)) {
+				let final: SessionTurn;
 				try {
-					if (await this.workerTurnFinished(allocation, prompt)) {
-						return inspection.valid && !inspection.clean
-							? { outcome: "uncommitted", diagnostic: "Worker finished with uncommitted changes in its owned worktree." }
-							: { outcome: "blocked", diagnostic: "Worker finished without an exact changed clean committed candidate." };
-					}
+					final = await this.workerSessionTurn(allocation, prompt, context.signal);
 				} catch (error) {
-					return { outcome: "unknown", diagnostic: `Worker session evidence cannot be verified: ${error instanceof SyntaxError ? "malformed JSONL" : safeText(error)}` };
+					if (this.contextInterrupted(context)) return { outcome: "interrupted", diagnostic: "Delivered prompt reconciliation was interrupted." };
+					return { outcome: "unknown", diagnostic: `Worker session evidence cannot be verified: ${safeText(error)}` };
 				}
-			}
-			if (!promptMayBeInFlight && SETTLED_AGENT_STATES.has(lifecycle.status)) {
-				return {
-					outcome: "blocked",
-					diagnostic: await this.diagnostic(allocation, context, "Settled worker did not produce an exact changed clean committed candidate."),
-				};
+				if (final.state === "succeeded" || final.state === "failed") {
+					return inspection.valid && !inspection.clean
+						? { outcome: "uncommitted", diagnostic: "Worker finished with uncommitted changes in its owned worktree." }
+						: { outcome: "blocked", diagnostic: "Worker finished without an exact changed clean committed candidate." };
+				}
+				// A running session has no Final turn yet. Pi can omit an error turn and retry it while Herdr reports a settled state.
+				if (final.state === "absent" && !promptMayBeInFlight) {
+					return {
+						outcome: "blocked",
+						diagnostic: await this.diagnostic(allocation, context, "Settled worker did not produce an exact changed clean committed candidate."),
+					};
+				}
 			}
 
 			try {
@@ -1307,56 +1310,16 @@ export class HerdrHostRuntime implements HostRuntime {
 		return `${leasePath}.session.jsonl`;
 	}
 
-	private async sessionFileExists(path: string): Promise<boolean> {
-		try { await lstat(path); return true; }
-		catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-			throw error;
-		}
-	}
-
-	private async privateSessionFile(path: string): Promise<string | undefined> {
-		let file;
-		try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-		catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-			throw error;
-		}
-		try {
-			const info = await file.stat();
-			const uid = process.getuid?.();
-			if (!info.isFile() || (info.mode & 0o077) !== 0 || (uid !== undefined && info.uid !== uid)
-				|| info.size > SESSION_LIMIT) throw new Error("Worker session file is not private, regular, or bounded.");
-			const chunks: Buffer[] = [];
-			let bytes = 0;
-			while (bytes <= SESSION_LIMIT) {
-				const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, SESSION_LIMIT + 1 - bytes));
-				const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
-				if (!bytesRead) break;
-				chunks.push(chunk.subarray(0, bytesRead));
-				bytes += bytesRead;
-			}
-			if (bytes > SESSION_LIMIT) throw new Error("Worker session file exceeds the 16 MiB limit.");
-			return Buffer.concat(chunks, bytes).toString("utf8");
-		} finally { await file.close(); }
-	}
-
-	private async workerTurnFinished(allocation: AgentAllocationIntent, prompt: string): Promise<boolean> {
-		const path = this.workerSessionFile(allocation.leasePath, allocation.token);
-		if (!await this.sessionFileExists(path)) return false;
-		await this.assertPrivateLeaseDirectories(allocation.leasePath, false);
-		const session = await this.privateSessionFile(path);
-		if (session === undefined) return false;
-		try { return exactDirectTerminalTurn(session, prompt); }
-		catch (error) {
-			if (error instanceof SyntaxError && !session.endsWith("\n")) return false; // Pi may still be writing the last JSONL entry.
-			throw error;
-		}
+	private async workerSessionTurn(allocation: AgentAllocationIntent, prompt: string, signal: AbortSignal): Promise<SessionTurn> {
+		const final = await readSessionTurn(this.workerSessionFile(allocation.leasePath, allocation.token), prompt, { signal });
+		// A symbolic link in the lease directories can redirect the session path, so evidence needs private directories.
+		if (final.state !== "absent") await this.assertPrivateLeaseDirectories(allocation.leasePath, false);
+		return final;
 	}
 
 	private async removeWorkerSessionFile(leasePath: string, token: string): Promise<void> {
 		const path = this.workerSessionFile(leasePath, token);
-		if (await this.privateSessionFile(path) !== undefined) await unlink(path);
+		if (await readPrivateSession(path) !== undefined) await unlink(path);
 	}
 
 	private assertLeasePath(path: string, token: string): void {
