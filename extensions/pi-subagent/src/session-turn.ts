@@ -109,7 +109,9 @@ function parseLine(line: string, path: string, lineNumber: number): Json {
 	try { entry = JSON.parse(line); } catch (error) {
 		throw new Error(`Pi session file ${path} has a malformed entry on line ${lineNumber}.`, { cause: error });
 	}
-	if (!isObject(entry) || typeof entry.type !== "string") {
+	if (!isObject(entry) || typeof entry.type !== "string"
+		// A message entry must carry a message object with a role. A broken payload is not evidence.
+		|| (entry.type === "message" && (!isObject(entry.message) || typeof entry.message.role !== "string"))) {
 		throw new Error(`Pi session file ${path} has a malformed entry on line ${lineNumber}.`);
 	}
 	return entry;

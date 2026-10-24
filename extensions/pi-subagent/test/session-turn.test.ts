@@ -161,6 +161,11 @@ test("only an unterminated last line can be incomplete", async (t) => {
 	await assert.rejects(read(await privateSession(t, malformed)), /malformed entry on line 3/);
 	await assert.rejects(read(await privateSession(t, lines([]) + "\n")), /malformed entry on line 3/);
 	await assert.rejects(read(await privateSession(t, lines([{ type: "message", parentId: "user", message: { role: "assistant" } }]))), /without an ID/);
+	// A complete message entry with a broken payload cannot hide behind an earlier answer.
+	for (const message of [null, "text", {}, { role: 1 }]) {
+		const broken = lines([assistant("final", "user", "stop", "answer"), { type: "message", id: "broken", parentId: "final", message }]);
+		await assert.rejects(read(await privateSession(t, broken)), /malformed entry on line 4/);
+	}
 });
 
 test("the private read rejects a wider mode, a symbolic link, and a file above the size limit", async (t) => {

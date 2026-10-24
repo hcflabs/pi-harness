@@ -86,7 +86,8 @@ export const createIsolatedComponents: CreateIsolatedComponents = ({
 		maxMs: null,
 		...(policy.maxTokens === undefined ? {} : { maxTokens: policy.maxTokens }),
 	});
-	const host = new HerdrHostRuntime({ inspectInFlightTaskCandidate: git.inspectInFlightTaskCandidate.bind(git), runProcess, executionBudget });
+	const host = new HerdrHostRuntime({ inspectInFlightTaskCandidate: git.inspectInFlightTaskCandidate.bind(git), runProcess, executionBudget,
+		settledIdleMs: () => currentPolicy().childIdleMs });
 	const coordinator = new RoleLaunchRuntime({
 		pi,
 		context,

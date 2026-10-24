@@ -1945,6 +1945,47 @@ test("a settled worker with an omitted error turn keeps polling until Pi writes 
 	script.done();
 });
 
+test("a settled worker whose retry was cancelled stops polling after the settled idle time", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	let clock = 1_000;
+	const delays: number[] = [];
+	const host = new HerdrHostRuntime({
+		inspectInFlightTaskCandidate: async () => ({ candidate: baseIdentity(), clean: true, valid: true }),
+		runProcess: script.run,
+		killProcess: () => {},
+		// Each poll advances the clock. The session does not grow because Pi cancelled its retry.
+		delay: async (milliseconds) => { delays.push(milliseconds); clock += 400; },
+		now: () => clock,
+		randomId: () => (++randomSequence).toString(16).padStart(32, "0"),
+		env: { HERDR_ENV: "1", HERDR_PANE_ID: "pane-current" },
+		leaseDirectory: fixture.leases,
+		lsofCommand: "lsof-test",
+		settledIdleMs: () => 1_000,
+	});
+	const { attempt } = await fullAttempt(fixture, host, script);
+	const lease = attempt.allocations.find((item): item is AgentAllocationIntent => item.kind === "agent")!.leasePath;
+	await privateLease(lease);
+	const prompt = `${buildChangesetTaskPrompt({ goal: GOAL, contexts: [], task, kind: "initial", worktreeCwd: fixture.worktree })}\n\nTurn identity: ${attempt.correlationToken}:${attempt.prompts.length}`;
+	await writeFile(`${lease}.session.jsonl`, [
+		JSON.stringify({ type: "message", id: "user-one", parentId: null, message: { role: "user", content: [{ type: "text", text: prompt }] } }),
+		JSON.stringify({ type: "message", id: "answer-one", parentId: "user-one", message: { role: "assistant", stopReason: "error", errorMessage: "429 rate_limit_error", content: [] } }),
+		JSON.stringify({ type: "context_edit", id: "omit-one", parentId: "answer-one", targetId: "answer-one", replacement: null }),
+	].join("\n") + "\n", { mode: 0o600 });
+	const done = { command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("done", true, { cwd: fixture.worktree }) }) };
+	script.push(
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_prompted", agent: agentInfo("done", true, { cwd: fixture.worktree }) }) },
+		done, done, done, done,
+		{ command: "herdr", args: ["agent", "read", AGENT_NAME, "--source", "recent", "--lines", "80", "--format", "text"], result: { code: 0, stdout: "done", stderr: "" } },
+	);
+	const result = await host.runWorker({ goal: GOAL, contexts: [], task, attempt, workerId: AGENT_NAME, kind: "initial", preCandidate: baseIdentity() }, context());
+	assert.equal(result.outcome, "unknown");
+	assert.match(result.diagnostic, /made no progress for 1000ms and has no Final turn/);
+	assert.deepEqual(delays, [250, 250, 250]);
+	script.done();
+});
+
 test("a repeated instruction cannot reuse an earlier finished turn as session proof", async (t) => {
 	const fixture = await paths(t);
 	const script = new ScriptedProcess();

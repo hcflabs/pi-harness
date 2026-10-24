@@ -60,6 +60,8 @@ const LSOF_OPERATION_CAP_MS = 3_000;
 const PROCESS_INSPECTION_CAP_MS = 3_000;
 const GIT_INSPECTION_CAP_MS = 30_000;
 const STALLED_PROMPT_POLL_MS = 250;
+/** The default time that a settled worker can show a running session without session growth. */
+const DEFAULT_SETTLED_IDLE_MS = 600_000;
 const HOST_LAYOUT_POLL_MS = 50;
 const HOST_LAYOUT_MAX_POLLS = 40;
 const DIAGNOSTIC_LIMIT = 8 * 1024;
@@ -92,6 +94,8 @@ export interface HerdrHostRuntimeOptions {
 	leaseDirectory?: string;
 	lsofCommand?: string;
 	executionBudget?: () => Omit<EphemeralSubagentExecutionBudget, "startedAt">;
+	/** The time that a settled worker can show a running session without session growth. The default is 10 minutes. */
+	settledIdleMs?: () => number;
 }
 
 type RepositoryIdentity = Pick<WorkspaceAllocationIntent, "repoKey" | "herdrRepoRoot">;
@@ -336,8 +340,10 @@ export class HerdrHostRuntime implements HostRuntime {
 	private readonly leaseDirectory: string;
 	private readonly lsofCommand: string;
 	private readonly executionBudget?: HerdrHostRuntimeOptions["executionBudget"];
+	private readonly settledIdleMs: () => number;
 
 	constructor(options: HerdrHostRuntimeOptions) {
+		this.settledIdleMs = options.settledIdleMs ?? (() => DEFAULT_SETTLED_IDLE_MS);
 		this.inspectInFlightCandidate = options.inspectInFlightTaskCandidate;
 		this.execute = options.runProcess ?? defaultRunProcess;
 		this.herdr = createHerdrClient(this.execute);
@@ -1019,6 +1025,8 @@ export class HerdrHostRuntime implements HostRuntime {
 		prompt: string,
 		promptMayBeInFlight = true,
 	): Promise<WorkerResult> {
+		// A settled worker with a running session can wait for a Pi retry. Session growth resets this bound.
+		let settledRunning: { since: number; size: number } | undefined;
 		for (;;) {
 			let lifecycle;
 			try {
@@ -1037,6 +1045,7 @@ export class HerdrHostRuntime implements HostRuntime {
 				return { outcome: "unknown", diagnostic: "Delivered prompt lifecycle is unknown." };
 			}
 			if (lifecycle.status === "working") {
+				settledRunning = undefined;
 				try { await this.delay(STALLED_PROMPT_POLL_MS, context.signal); }
 				catch (error) {
 					return { outcome: this.contextInterrupted(context) ? "interrupted" : "unknown", diagnostic: `Delivered prompt polling failed: ${safeText(error)}` };
@@ -1083,6 +1092,19 @@ export class HerdrHostRuntime implements HostRuntime {
 						: { outcome: "blocked", diagnostic: "Worker finished without an exact changed clean committed candidate." };
 				}
 				// A running session has no Final turn yet. Pi can omit an error turn and retry it while Herdr reports a settled state.
+				if (final.state === "running") {
+					let size: number;
+					try { size = (await lstat(this.workerSessionFile(allocation.leasePath, allocation.token))).size; }
+					catch (error) { return { outcome: "unknown", diagnostic: `Worker session evidence cannot be verified: ${safeText(error)}` }; }
+					const now = this.now();
+					if (!settledRunning || size !== settledRunning.size) settledRunning = { since: now, size };
+					else if (now - settledRunning.since >= this.settledIdleMs()) {
+						return {
+							outcome: "unknown",
+							diagnostic: await this.diagnostic(allocation, context, `Settled worker session made no progress for ${this.settledIdleMs()}ms and has no Final turn.`),
+						};
+					}
+				} else settledRunning = undefined;
 				if (final.state === "absent" && !promptMayBeInFlight) {
 					return {
 						outcome: "blocked",
