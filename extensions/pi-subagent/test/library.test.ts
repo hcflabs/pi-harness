@@ -721,7 +721,6 @@ test("Role launch resolves call, Role, then Model Task routes", async (t) => {
 		"--exclude-tools", "delegate_task,ask_question,subagent_status,subagent_resume,subagent_stage,subagent_integrate,subagent_abort,herdr_handoff,herdr_command",
 	]);
 	assert.deepEqual(valuesAfter(launch.args, "--extension").slice(0, 2), ["/roles/reviewer.ts", "/caller/adapter.ts"]);
-	assert.equal(valuesAfter(launch.args, "--extension").filter((path) => path.endsWith("/pi-multi-codex/extensions/multi-codex.ts")).length, 1);
 	const extensionArgs = valuesAfter(launch.args, "--extension");
 	assert.match(extensionArgs.at(-1)!, /pi-subagent\/extensions\/role-tools\.ts$/);
 	assert.deepEqual(valuesAfter(launch.args, "--skill"), ["/effective/security/SKILL.md"]);

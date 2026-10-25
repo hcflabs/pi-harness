@@ -63,7 +63,6 @@ Each package owns its source, tests, and README.
 | `pi-memory` | `pi-memory` | fixed fields | `directory` `absolutePath()` with `onInvalid: "disable"`, so an invalid or misspelled `directory` disables memory; char limits `integer({ min: 1, max: 100_000 })`. |
 | `pi-prompt-creator` | `pi-prompt-creator` | fixed fields | `automatic` `boolean()`, `inputThreshold` `integer({ min: 1 })`. An `automatic` issue or a file-level issue keeps automatic analysis off; a missing file uses `true`. |
 | `pi-auto-compact` | `pi-auto-compact` | fixed fields | `autoCompactThreshold` `number({ min: 25, lessThan: 100 })`. |
-| `pi-multi-codex` | `pi-multi-codex` | fixed fields | `autoSwitchOn429` `field(boolean(), true)`. An `autoSwitchOn429` issue or a file-level issue keeps 429 switching off; a missing file uses `true`. Keep `usage.json` strict. |
 | `pi-cron` | `pi-cron` | fixed fields | `jobs` `array(job, { unique: (job) => job.id })` with the custom job parser; `limits` custom object parser with the `maxMinutes > idleMinutes` rule. Keep run state strict. |
 | `pi-herdr-tools` | `pi-herdr-btw` | fixed fields | `autoSubmit` `boolean()`, `tools` `oneOf(TOOL_MODES)`, `split` `oneOf(["right", "down"])`. `/btw config` keeps `update`; reset uses `save`. |
 | `pi-add-dir` | `pi-add-dir` | fixed fields | `directories` `array(absolutePath(), { unique: (dir) => dir })`. |

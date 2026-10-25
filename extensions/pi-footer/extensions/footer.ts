@@ -15,7 +15,6 @@ const THINKING_COLORS = {
 	xhigh: 208,
 	max: 196,
 } as const;
-const QUOTA_STATUS_KEY = "pi-multi-codex";
 const AGENT_TIME_ENTRY = "pi-footer:agent-work";
 const SUBAGENT_BACKGROUND_RESULT = "subagent-background-result";
 // Shorter windows are bursts (non-streamed fallbacks, one large chunk) or too coarse to time.
@@ -369,10 +368,9 @@ export default function footerExtension(pi: ExtensionAPI): void {
 					const codegraph = activeCodegraphCalls.size > 0
 						? `${paintFooter(theme, footerColors.codegraphActive, "accent", "●")} CG`
 						: sanitizeStatus(extensionStatuses.get("pi-codegraph") ?? "");
-					const quotaStatus = sanitizeStatus(extensionStatuses.get(QUOTA_STATUS_KEY) ?? "");
 					const externalStatuses: string[] = [];
 					for (const [key, value] of [...extensionStatuses].sort(([a], [b]) => a.localeCompare(b))) {
-						if (key === "pi-codegraph" || key === QUOTA_STATUS_KEY) continue;
+						if (key === "pi-codegraph") continue;
 						const text = sanitizeStatus(value);
 						if (text) externalStatuses.push(text);
 					}
@@ -407,9 +405,8 @@ export default function footerExtension(pi: ExtensionAPI): void {
 					const checkoutLink = linkUri ? hyperlink(checkoutText, linkUri) : checkoutText;
 					const checkoutStatus = gitSummary.badges ? `${checkoutLink} ${paintFooter(theme, footerColors.gitStatus, "dim", gitSummary.badges)}` : checkoutLink;
 					const identityLine = `${identity}${checkoutStatus}`;
-					const firstLine = quotaStatus ? align(identityLine, quotaStatus, width, ellipsis) : identityLine;
 					const lines = [
-						firstLine,
+						identityLine,
 						align(usage, model, width, ellipsis),
 						alignRightReserved([codegraph, ...externalStatuses].filter(Boolean).join(plainSep(" · ")), runtime, width, ellipsis),
 					];

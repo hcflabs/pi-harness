@@ -2,7 +2,7 @@
 
 Keep footer identity, model usage, agent-work time, and extension status visible in Pi. Enable the footer and open commands independently.
 
-![Pi footer showing repository, quota, usage, model, and extension status](./example.png)
+![Pi footer showing repository, usage, model, and extension status](./example.png)
 
 ## Install
 
@@ -31,7 +31,6 @@ Select `extensions/footer.ts` for only the footer, or use `pi config` to toggle 
 | --- | --- | --- |
 | [`@hcflabs/pi-codegraph`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-codegraph) | Improves | Shows CodeGraph index status, quiet setup progress, and direct tool activity when loaded. |
 | [`@hcflabs/pi-config-store`](https://github.com/hcflabs/pi-harness/tree/main/packages/pi-config-store) | Required | Owns config-home resolution and storage. |
-| [`@hcflabs/pi-multi-codex`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-multi-codex) | Improves | Adds active Codex subscription quota and reset status. |
 | [`@hcflabs/pi-subagent`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-subagent) | Improves | Adds completed background workflow usage to the token and cost totals. |
 
 ## Use
@@ -50,7 +49,7 @@ Start a Pi TUI session to see the footer. Run `/open` to open the current direct
 
 | Line | Left | Right |
 | --- | --- | --- |
-| First | Repository, branch, and Git state. Linked-worktree branches omit the generated `worktree/` prefix. | Non-empty `pi-multi-codex` family status. |
+| First | Repository, branch, and Git state. Linked-worktree branches omit the generated `worktree/` prefix. | Nothing. |
 | Second: usage line | Input and output token totals, latest cache-hit rate, response throughput, estimated cost, and context use. | Active model and thinking level. |
 | Third | CodeGraph first, then other extension statuses sorted by key, including Ponytail and `pi-rewind`. | Cumulative agent-work time. |
 
