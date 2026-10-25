@@ -10,7 +10,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import { closeIndexDatabases, DEFAULT_SYNC_CAP, getPreparationRows, getSessionRows, searchIndex, syncSessions } from "../extensions/search-core.ts";
-import { buildFtsQueryPlan, MAX_QUERY_CHARS } from "../extensions/query.ts";
+import { buildFtsQueryPlan, buildLikeQueryPlan, foldCase, MAX_QUERY_CHARS } from "../extensions/query.ts";
 import { readBoundedSnapshot } from "../extensions/transcript.ts";
 import { getWindow } from "../extensions/hydrate.ts";
 
@@ -1290,6 +1290,91 @@ describe("sanitize ladder regression", () => {
 		const { hits } = searchIndex(dbPath, "verbose-flood", { limit: 5 });
 		const paths = new Set(hits.map((h) => h.path));
 		assert.equal(paths.size, 2, "both sessions must surface despite flood volume");
+	});
+});
+
+describe("short-term LIKE candidate filter", () => {
+	it("builds an FTS filter only for pure-AND plans with long printable ASCII operands", () => {
+		const prefilter = (q: string) => buildLikeQueryPlan(q)?.ftsPrefilter ?? null;
+		assert.equal(prefilter("Go deployment"), '"deployment"');
+		assert.equal(prefilter("Go Deploy* (staging pipeline)"), '"deploy" "staging" "pipeline"');
+		assert.equal(prefilter('Qj "deploy*"'), '"deploy*"');
+		assert.equal(prefilter('Go "say ""hi"" now"'), '"say ""hi"" now"');
+		assert.equal(prefilter("Go KUBI"), '"kub"', "a final i can come from U+0130 in the text");
+		assert.equal(prefilter("Go ki"), null);
+		assert.equal(prefilter("ab cd"), null);
+		assert.equal(prefilter("éx déploiement"), null, "non-ASCII operands keep the full LIKE scan");
+		assert.equal(prefilter("Go OR deployment"), null);
+		assert.equal(prefilter("Go AND deployment"), null);
+		assert.equal(prefilter("Go NOT deployment"), null);
+		assert.equal(prefilter("NEAR(Go deployment)"), null);
+	});
+
+	it("filtered LIKE rows equal full LIKE rows over Unicode text", () => {
+		const texts = [
+			"we chose the Go deployment strategy",
+			"GO DEPLOYMENT in caps",
+			"KUBİ cluster Go notes", // U+0130 folds to i + U+0307 under foldCase
+			"\u212Aubernetes Go rollout", // KELVIN SIGN folds to k
+			"ÉCOLE Go déploiement",
+			"the oracle answered ΟΣ Go plainly",
+			"Straße Go STRASSE",
+			"say \"hi\" now Go",
+			"deploy* literal Go star",
+			"unrelated text only",
+		];
+		writeFixture("--prefilter--", "p.jsonl", [sessionHeader(), ...texts.map((text, i) => msg(`pf${i}`, i % 2 ? "assistant" : "user", text))]);
+		syncSessions(sessionsDir, dbPath);
+		const db = new DatabaseSync(dbPath, { readOnly: true });
+		db.function("ulower", (value: any) => typeof value === "string" ? foldCase(value) : "");
+		try {
+			const queries = [
+				"Go deployment", "go KUBI", "go kub", "Go kubernetes", "Go \u212Aubernetes", "go école", "go ÉCOLE",
+				"go οσ", "Go straße", "Go strasse", 'Go "say ""hi"" now"', 'Go "deploy*"', "Go deploy*", "Go plainly",
+			];
+			let filtered = 0;
+			for (const query of queries) {
+				const plan = buildLikeQueryPlan(query)!;
+				const ids = (sql: string, params: any[]) => (db.prepare(`SELECT m.entry_id FROM messages m WHERE ${sql} ORDER BY m.rowid`).all(...params) as any[]).map((r) => r.entry_id);
+				const full = ids(plan.where, plan.params);
+				assert.ok(full.length > 0 || query === "Go \u212Aubernetes", `fixture must match \`${query}\``);
+				if (plan.ftsPrefilter === null) continue;
+				filtered++;
+				const candidates = ids(`${plan.where} AND m.rowid IN (SELECT rowid FROM session_fts WHERE session_fts MATCH ?)`, [...plan.params, plan.ftsPrefilter]);
+				assert.deepEqual(candidates, full, `filter must keep every LIKE row for \`${query}\``);
+			}
+			assert.ok(filtered >= 6, "the test must exercise the filter");
+		} finally {
+			db.close();
+		}
+
+		for (const [query, entry] of [["go KUBI", "pf2"], ["Go kubernetes", "pf3"], ["go ÉCOLE", "pf4"], ["go οσ", "pf5"]] as const) {
+			assert.deepEqual(searchIndex(dbPath, query, { limit: 10 }).hits.map((hit) => hit.matchMessageId), [entry], `\`${query}\` end to end`);
+		}
+	});
+
+	it("keeps session ranking for a filtered short-term query", () => {
+		const frequent = writeFixture("--rank-frequent--", "f.jsonl", [
+			sessionHeader({ timestamp: "2026-01-01T00:00:00.000Z" }),
+			msg("rf1", "user", "Qx rankmarker one"),
+			msg("rf2", "assistant", "Qx rankmarker two"),
+		], 1000);
+		const newer = writeFixture("--rank-newer--", "n.jsonl", [sessionHeader({ timestamp: "2026-01-03T00:00:00.000Z" }), msg("rn1", "user", "Qx RANKMARKER newer")], 2000);
+		const older = writeFixture("--rank-older--", "o.jsonl", [sessionHeader({ timestamp: "2026-01-02T00:00:00.000Z" }), msg("ro1", "user", "qx rankmarker older")], 3000);
+		writeFixture("--rank-miss--", "m.jsonl", [sessionHeader(), msg("rm1", "user", "Qx without the marker")], 4000);
+		syncSessions(sessionsDir, dbPath, { cap: 10 });
+		assert.equal(buildLikeQueryPlan("Qx rankmarker")?.ftsPrefilter, '"rankmarker"');
+		const hits = searchIndex(dbPath, "Qx rankmarker", { limit: 10 }).hits;
+		assert.deepEqual(hits.map((hit) => hit.path), [frequent, newer, older]);
+		assert.deepEqual(hits.map((hit) => hit.matchMessageId), ["rf2", "rn1", "ro1"]);
+	});
+
+	it("an OR query with a short term keeps the full LIKE path", () => {
+		const go = writeFixture("--or-go--", "go.jsonl", [sessionHeader(), msg("og", "user", "Go only here")], 1000);
+		const kube = writeFixture("--or-kube--", "kube.jsonl", [sessionHeader(), msg("ok", "user", "kubernetes only here")], 2000);
+		syncSessions(sessionsDir, dbPath, { cap: 10 });
+		assert.equal(buildLikeQueryPlan("Go OR kubernetes")?.ftsPrefilter, null);
+		assert.deepEqual(new Set(searchIndex(dbPath, "Go OR kubernetes", { limit: 10 }).hits.map((hit) => hit.path)), new Set([go, kube]));
 	});
 });
 

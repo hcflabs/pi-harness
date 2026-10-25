@@ -796,20 +796,37 @@ export function searchIndex(
 		if (usedLike) {
 			const likePlan = buildLikeQueryPlan(query);
 			if (likePlan === null) return { hits: [], backlogRemaining: getBacklog(db) };
-			rows = db.prepare(`WITH ranked AS (
+			// The FTS candidate filter only removes rows that the LIKE plan cannot
+			// match, so it leaves the matched set, the ranking, and the order the same.
+			const likeRows = (prefilter: string | null) => db.prepare(`WITH ranked AS (
 			            SELECT m.path, m.entry_id, m.role, m.timestamp, m.head, m.tail, s.cwd, s.name, s.started_at,
 			                   s.parent_session,
 			                   ROW_NUMBER() OVER (PARTITION BY m.path ORDER BY m.rowid DESC) AS rn,
 			                   COUNT(*) OVER (PARTITION BY m.path) AS matches
 			             FROM messages m LEFT JOIN sessions s ON s.path = m.path
-			             WHERE ${likePlan.where} AND ${CURRENT_SESSION_FILTER_SQL}
+			             WHERE ${likePlan.where}
+			               ${prefilter === null ? "" : "AND m.rowid IN (SELECT rowid FROM session_fts WHERE session_fts MATCH ?)"}
+			               AND ${CURRENT_SESSION_FILTER_SQL}
 			            )
 			            SELECT path, entry_id, role, timestamp, head, tail, cwd, name, started_at
 			            FROM ranked r
 			            WHERE rn <= 1
 			              AND ${LINEAGE_FILTER_SQL}
 			            ORDER BY matches DESC, started_at DESC, path
-			            LIMIT ?`).all(...likePlan.params, currentSessionPath, currentSessionPath, limit) as any;
+			            LIMIT ?`).all(
+				...likePlan.params,
+				...(prefilter === null ? [] : [prefilter]),
+				currentSessionPath,
+				currentSessionPath,
+				limit,
+			) as any;
+			try {
+				rows = likeRows(likePlan.ftsPrefilter);
+			} catch (err) {
+				// The full LIKE scan stays the result of record if the filter fails.
+				if (likePlan.ftsPrefilter === null) throw err;
+				rows = likeRows(null);
+			}
 			// Snippets anchor on operand terms only — operator words like OR would
 			// otherwise match common substrings and hide the real match.
 			for (const r of rows as any[]) r.snip = likeSnippet(r.head, r.tail, likePlan.terms);
