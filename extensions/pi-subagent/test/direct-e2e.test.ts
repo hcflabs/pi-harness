@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { exactDirectAnswer } from "../src/direct-herdr.ts";
+import { readSessionTurn } from "../src/session-turn.ts";
 
 // Run explicitly inside Herdr: PI_SUBAGENT_E2E=1 node --test test/direct-e2e.test.ts
 // Uses real configured Pi models and real Herdr tabs; never runs in the default package suite.
@@ -173,7 +173,9 @@ test("real Pi and Herdr deliver single, parallel, and chain direct results", { s
 				const entry = JSON.parse(line);
 				return entry.type === "message" && entry.message?.role === "user";
 			})!).message.content[0].text;
-			const prior = exactDirectAnswer(first, firstPrompt);
+			const turn = await readSessionTurn(tabs[0]!.sessionFile, firstPrompt);
+			assert.equal(turn.state, "succeeded");
+			const prior = turn.state === "succeeded" ? turn.answer : "";
 			const second = await readFile(tabs[1]!.sessionFile, "utf8");
 			assert.match(second, /Repeat this prior answer verbatim:/);
 			assert.ok(second.includes(`Repeat this prior answer verbatim: ${prior}`), "chain must substitute the exact preceding answer");

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, open, realpath, rm, stat, truncate, writeFile } from "node:fs/promises";
+import { appendFile, chmod, mkdir, mkdtemp, open, realpath, rm, stat, truncate, writeFile } from "node:fs/promises";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -1903,6 +1903,86 @@ test("an exact failed terminal turn without a commit reports attention after a s
 	);
 	const result = await host.runWorker({ goal: GOAL, contexts: [], task, attempt, workerId: AGENT_NAME, kind: "initial", preCandidate: baseIdentity() }, context());
 	assert.equal(result.outcome, "blocked");
+	script.done();
+});
+
+test("a settled worker with an omitted error turn keeps polling until Pi writes the retried turn", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const delays: number[] = [];
+	let path = "";
+	let retried = false;
+	const host = runtime(fixture, script, async () => baseIdentity(), {
+		delay: async (milliseconds) => {
+			delays.push(milliseconds);
+			// Pi retries the omitted turn and the worker commits while Herdr reports done.
+			await appendFile(path, JSON.stringify({ type: "message", id: "answer-two", parentId: "omit-one", message: {
+				role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Committed the change." }] } }) + "\n");
+			retried = true;
+		},
+		inspectInFlightTaskCandidate: async () => ({ candidate: retried ? changedIdentity() : baseIdentity(), clean: true, valid: true }),
+	});
+	const { attempt } = await fullAttempt(fixture, host, script);
+	const lease = attempt.allocations.find((item): item is AgentAllocationIntent => item.kind === "agent")!.leasePath;
+	await privateLease(lease);
+	const prompt = `${buildChangesetTaskPrompt({ goal: GOAL, contexts: [], task, kind: "initial", worktreeCwd: fixture.worktree })}\n\nTurn identity: ${attempt.correlationToken}:${attempt.prompts.length}`;
+	path = `${lease}.session.jsonl`;
+	await writeFile(path, [
+		JSON.stringify({ type: "message", id: "user-one", parentId: null, message: { role: "user", content: [{ type: "text", text: prompt }] } }),
+		JSON.stringify({ type: "message", id: "answer-one", parentId: "user-one", message: { role: "assistant", stopReason: "error", errorMessage: "429 rate_limit_error", content: [] } }),
+		JSON.stringify({ type: "context_edit", id: "omit-one", parentId: "answer-one", targetId: "answer-one", replacement: null }),
+	].join("\n") + "\n", { mode: 0o600 });
+	script.push(
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_prompted", agent: agentInfo("done", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("done", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("done", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: ["agent", "read", AGENT_NAME, "--source", "recent", "--lines", "80", "--format", "text"], result: { code: 0, stdout: "done", stderr: "" } },
+	);
+	const result = await host.runWorker({ goal: GOAL, contexts: [], task, attempt, workerId: AGENT_NAME, kind: "initial", preCandidate: baseIdentity() }, context());
+	assert.equal(result.outcome, "candidate");
+	assert.deepEqual(delays, [250]);
+	script.done();
+});
+
+test("a settled worker whose retry was cancelled stops polling after the settled idle time", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	let clock = 1_000;
+	const delays: number[] = [];
+	const host = new HerdrHostRuntime({
+		inspectInFlightTaskCandidate: async () => ({ candidate: baseIdentity(), clean: true, valid: true }),
+		runProcess: script.run,
+		killProcess: () => {},
+		// Each poll advances the clock. The session does not grow because Pi cancelled its retry.
+		delay: async (milliseconds) => { delays.push(milliseconds); clock += 400; },
+		now: () => clock,
+		randomId: () => (++randomSequence).toString(16).padStart(32, "0"),
+		env: { HERDR_ENV: "1", HERDR_PANE_ID: "pane-current" },
+		leaseDirectory: fixture.leases,
+		lsofCommand: "lsof-test",
+		settledIdleMs: () => 1_000,
+	});
+	const { attempt } = await fullAttempt(fixture, host, script);
+	const lease = attempt.allocations.find((item): item is AgentAllocationIntent => item.kind === "agent")!.leasePath;
+	await privateLease(lease);
+	const prompt = `${buildChangesetTaskPrompt({ goal: GOAL, contexts: [], task, kind: "initial", worktreeCwd: fixture.worktree })}\n\nTurn identity: ${attempt.correlationToken}:${attempt.prompts.length}`;
+	await writeFile(`${lease}.session.jsonl`, [
+		JSON.stringify({ type: "message", id: "user-one", parentId: null, message: { role: "user", content: [{ type: "text", text: prompt }] } }),
+		JSON.stringify({ type: "message", id: "answer-one", parentId: "user-one", message: { role: "assistant", stopReason: "error", errorMessage: "429 rate_limit_error", content: [] } }),
+		JSON.stringify({ type: "context_edit", id: "omit-one", parentId: "answer-one", targetId: "answer-one", replacement: null }),
+	].join("\n") + "\n", { mode: 0o600 });
+	const done = { command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("done", true, { cwd: fixture.worktree }) }) };
+	script.push(
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_info", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+		{ command: "herdr", args: () => {}, result: success({ type: "agent_prompted", agent: agentInfo("done", true, { cwd: fixture.worktree }) }) },
+		done, done, done, done,
+		{ command: "herdr", args: ["agent", "read", AGENT_NAME, "--source", "recent", "--lines", "80", "--format", "text"], result: { code: 0, stdout: "done", stderr: "" } },
+	);
+	const result = await host.runWorker({ goal: GOAL, contexts: [], task, attempt, workerId: AGENT_NAME, kind: "initial", preCandidate: baseIdentity() }, context());
+	assert.equal(result.outcome, "unknown");
+	assert.match(result.diagnostic, /made no progress for 1000ms and has no Final turn/);
+	assert.deepEqual(delays, [250, 250, 250]);
 	script.done();
 });
 
