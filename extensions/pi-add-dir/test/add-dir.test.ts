@@ -8,6 +8,7 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteProvider } from "@earendil-works/pi-tui";
 import { Value } from "typebox/value";
+import { readDiagnostics } from "@hcflabs/pi-config-store";
 import { buildContextInjection, collectSkillPaths, findFiles, resolveDir, scanDirContext } from "../extensions/add-dir-helpers.ts";
 import { createAddDirConfigStore } from "../extensions/add-dir-config.ts";
 import addDirExtension, { createExternalAutocompleteProvider } from "../extensions/add-dir.ts";
@@ -823,7 +824,11 @@ test("surfaces Git failures inside a discovered repository", async () => {
 	}
 });
 
-test("warns and preserves missing or overlapping global directories", async () => {
+test("warns and preserves missing or overlapping global directories", async (t) => {
+	const error = t.mock.method(console, "error", () => {});
+	const warn = t.mock.method(console, "warn", () => {});
+	const log = t.mock.method(console, "log", () => {});
+	const stderr = t.mock.method(process.stderr, "write", () => true);
 	const agentDir = await mkdtemp(join(tmpdir(), "pi-add-dir-agent-"));
 	const cwd = await mkdtemp(join(tmpdir(), "pi-add-dir-project-"));
 	const missing = join(agentDir, "missing");
@@ -833,6 +838,8 @@ test("warns and preserves missing or overlapping global directories", async () =
 		const { handlers } = loadExtension({ agentDir });
 		await handlers.get("session_start")!({}, interactiveContext(cwd, () => [], { notifications }));
 		assert.equal(notifications.filter(({ level }) => level === "warning").length, 2);
+		assert.deepEqual(readDiagnostics().slice(-2).map(({ source, level, message }) => ({ source, level, message })), notifications.map(({ message }) => ({ source: "pi-add-dir", level: "warning", message: `pi-add-dir: ${message}` })));
+		assert.equal(error.mock.callCount() + warn.mock.callCount() + log.mock.callCount() + stderr.mock.callCount(), 0);
 		assert.deepEqual(savedGlobalDirectories(agentDir), [missing, cwd]);
 	} finally {
 		await rm(agentDir, { recursive: true, force: true });
@@ -840,20 +847,17 @@ test("warns and preserves missing or overlapping global directories", async () =
 	}
 });
 
-test("writes skipped-directory warnings to stderr without UI", async () => {
+test("writes skipped-directory warnings to stderr without UI", async (t) => {
 	const agentDir = await mkdtemp(join(tmpdir(), "pi-add-dir-agent-"));
 	const cwd = await mkdtemp(join(tmpdir(), "pi-add-dir-project-"));
 	const missing = join(agentDir, "missing");
-	const messages: string[] = [];
-	const originalConsoleError = console.error;
+	const stderr = t.mock.method(process.stderr, "write", () => true);
 	try {
 		await createAddDirConfigStore(agentDir).save({ directories: [missing] });
-		console.error = (...args: unknown[]) => messages.push(args.map(String).join(" "));
 		const { handlers } = loadExtension({ agentDir });
 		await handlers.get("session_start")!({}, extensionContext(cwd, () => []));
-		assert.deepEqual(messages, [`pi-add-dir: Skipped global external directory ${missing}: directory does not exist.`]);
+		assert.deepEqual(stderr.mock.calls[0]!.arguments, [`pi-add-dir: Skipped global external directory ${missing}: directory does not exist.\n`]);
 	} finally {
-		console.error = originalConsoleError;
 		await rm(agentDir, { recursive: true, force: true });
 		await rm(cwd, { recursive: true, force: true });
 	}

@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { setImmediate } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import codegraphExtension from "../extensions/codegraph.ts";
+import { readDiagnostics } from "@hcflabs/pi-config-store";
 
 const exec = promisify(execFile);
 
@@ -40,6 +41,7 @@ function harness(cwd: string, options: {
 	onStatus?: (text: string | undefined) => void;
 	confirm?: boolean | ((signal?: AbortSignal) => Promise<boolean>);
 	reindexRecommended?: boolean;
+	status?: Awaited<ReturnType<ExtensionAPI["exec"]>>;
 } = {}) {
 	let start!: (event: unknown, ctx: ExtensionContext) => Promise<void> | void;
 	let shutdown!: typeof start;
@@ -49,6 +51,7 @@ function harness(cwd: string, options: {
 	const prompts: string[] = [];
 	let tool!: ToolDefinition;
 	const pi = {
+		registerCommand: () => {},
 		registerMcpServer: (name: string, config: unknown) => servers.set(name, config),
 		unregisterMcpServer: (name: string) => servers.delete(name),
 		on: (name: string, handler: typeof start) => {
@@ -62,6 +65,7 @@ function harness(cwd: string, options: {
 				if (args[0] === "--version") return options.version ?? { code: 0, stdout: "1.6.0", stderr: "", killed: false };
 				if (args[0] === "explore") return options.explore ?? { code: 0, stdout: "explored", stderr: "", killed: false };
 				if (args[0] === "status") {
+					if (options.status) return options.status;
 					const index = { state: "complete", reindexRecommended: options.reindexRecommended ?? false };
 					return { code: 0, stdout: JSON.stringify({ index }), stderr: "", killed: false };
 				}
@@ -222,6 +226,42 @@ test("seeds from the closest usable index, then syncs", async (t) => {
 	}
 });
 
+test("seed failures record one warning before init without a notification or console output", async (t) => {
+	const stderr = t.mock.method(process.stderr, "write", () => true);
+	const warn = t.mock.method(console, "warn", () => {});
+	const error = t.mock.method(console, "error", () => {});
+	const log = t.mock.method(console, "log", () => {});
+	for (const failure of ["no candidate", "lock", "copy", "status JSON", "status rejected"]) {
+		const { primary, worktree } = await fixture(t);
+		await mkdir(join(primary, ".codegraph"));
+		const source = join(primary, ".codegraph", "codegraph.db");
+		const head = (await exec("git", ["-C", worktree, "rev-parse", "HEAD"])).stdout.trim();
+		const db = new DatabaseSync(source);
+		db.exec(`CREATE TABLE project_metadata (key TEXT PRIMARY KEY, value TEXT);
+			INSERT INTO project_metadata VALUES ('index_state', 'complete'), ('indexed_with_version', '${failure === "no candidate" ? "old" : "1.6.0"}'), ('indexed_at_commit', '${head}');`);
+		db.close();
+		if (failure === "lock") await writeFile(join(primary, ".codegraph", "codegraph.lock"), "1");
+		const before = readDiagnostics().length;
+		const run = harness(worktree, {
+			status: failure === "status JSON" ? { code: 0, stdout: "{", stderr: "", killed: false } : undefined,
+			reindexRecommended: failure === "status rejected",
+			gitProbe: async (args) => {
+				if (failure === "copy" && args[0] === "diff") await writeFile(source, "not a database");
+				return undefined;
+			},
+		});
+		await run.start();
+		assert.equal(readDiagnostics().length, before + 1, failure);
+		const event = readDiagnostics().at(-1)!;
+		assert.equal(event.source, "pi-codegraph");
+		assert.equal(event.level, "warning");
+		assert.match(event.message, /^Seed failed: .+ CodeGraph will run init\.$/);
+		assert.deepEqual(run.notices, []);
+		assert.ok(run.calls.some(({ args }) => args[0] === "init"));
+	}
+	assert.equal(stderr.mock.callCount() + warn.mock.callCount() + error.mock.callCount() + log.mock.callCount(), 0);
+});
+
 test("never passes indexed metadata to Git as an option", async (t) => {
 	const { base, primary, worktree } = await fixture(t);
 	const output = join(base, "overwritten");
@@ -367,18 +407,25 @@ test("warns with the install command when the CLI is unavailable without creatin
 	// Even an existing index still needs a working CLI for codegraph_explore.
 	await index(worktree);
 	const options = { version: { code: 1, stdout: "", stderr: "", killed: false } };
+	const warn = t.mock.method(console, "warn", () => {});
+	const error = t.mock.method(console, "error", () => {});
+	const log = t.mock.method(console, "log", () => {});
+	const stderr = t.mock.method(process.stderr, "write", () => true);
 	const run = harness(worktree, options);
 	await run.start();
+	assert.equal(readDiagnostics().at(-1)!.source, "pi-codegraph");
+	assert.equal(readDiagnostics().at(-1)!.level, "warning");
+	assert.match(readDiagnostics().at(-1)!.message, /codegraph --version failed/);
+	assert.equal(warn.mock.callCount() + error.mock.callCount() + log.mock.callCount() + stderr.mock.callCount(), 0);
 	assert.deepEqual(run.calls, [{ command: "codegraph", args: ["--version"], cwd: worktree }]);
 	assert.equal(run.notices[0]!.level, "warning");
 	assert.equal(run.statuses.at(-1), "<warning>!</warning> CG: prerequisites missing");
 	assert.ok(run.notices[0]!.message.includes("npm install -g @colbymchenry/codegraph"));
 	await assert.rejects(rmdir(lock), { code: "ENOENT" });
 	const headless = harness(worktree, { ...options, hasUI: false });
-	const warn = t.mock.method(console, "warn", () => {});
 	await headless.start();
-	assert.deepEqual(warn.mock.calls[0]!.arguments, [run.notices[0]!.message]);
-	warn.mock.restore();
+	assert.deepEqual(stderr.mock.calls[0]!.arguments, [`${readDiagnostics().at(-1)!.message}\n`]);
+	assert.equal(warn.mock.callCount(), 0);
 	const timeout = harness(worktree, { version: { code: 0, stdout: "", stderr: "", killed: true } });
 	await timeout.start();
 	assert.match(timeout.notices[0]!.message, /timed out or killed/);

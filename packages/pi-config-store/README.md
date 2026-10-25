@@ -43,6 +43,18 @@ export default function (pi: ExtensionAPI) {
 
 `registerConfigReporting` shows launch problems. Call `reporter.report` after each lazy read. New problems then also show once.
 
+### Diagnostics
+
+Call `registerDiagnosticsCommand(pi)` in your extension factory to provide `/diagnostics`. The first caller registers the shared command. The owner releases its claim on `session_shutdown`.
+
+The log stays in memory across module copies. It keeps the newest 200 events, oldest first. The process loses all events on exit. Each message has a 500-character limit. The helper removes ANSI sequences and control characters.
+
+Callers must not record secrets or prompt text. `recordDiagnostic` does not write to the console with UI. With an explicit context without UI, it writes one message line to stderr. Without a context, it only records the event.
+
+`/diagnostics` shows the newest 20 events in one notification. `/diagnostics all` shows all events. Without UI, the command writes to stdout. An empty log shows `No diagnostics.`. `readDiagnostics()` returns copies of the events.
+
+Config reporters also record each new report in this log.
+
 ### Load rules
 
 | Problem | Result |
@@ -73,7 +85,7 @@ On each `session_start`, `registerConfigReporting(pi, stores)` loads each store.
 | `disabled` | `error` | `<extension-id> disabled (<path>): <issues>` |
 | `ok` with issues | `warning` | `<extension-id> config issues (<path>): <issues>; defaults replace invalid settings.` |
 
-When `ctx.hasUI` is false, the reporter writes the same text to stderr. Each issue shows one time in each session. The reporter identifies an issue by its file path, kind, key, and message.
+When `ctx.hasUI` is false, the reporter writes the diagnostic message to stderr, within the 500-character limit. Each issue shows one time in each session. The reporter identifies an issue by its file path, kind, key, and message.
 
 All reporters in the Pi process share this record, including reporters of other extensions. When two extensions report the same file, each issue shows only one time. A new `session_start` event starts a new record.
 
@@ -92,6 +104,11 @@ All reporters in the Pi process share this record, including reporters of other 
 | `ConfigIssue` | type | `{ kind, key, message }`. `key` is a key path such as `jobs[2].cwd`, or `""` for the whole file. |
 | `formatConfigIssues(issues)` | function | Formats issues as `key: message; ...`. |
 | `registerConfigReporting(pi, stores)` | function | Reports issues on `session_start` and returns a `ConfigReporter`. |
+| `DiagnosticLevel` | type | `"info" \| "warning" \| "error"`. |
+| `DiagnosticEvent` | type | `{ time, source, level, message }`. `time` is an ISO timestamp. |
+| `recordDiagnostic(source, level, message, ctx?)` | function | Records an event. An explicit context without UI also writes the message to stderr. |
+| `readDiagnostics()` | function | Returns event copies, oldest first. |
+| `registerDiagnosticsCommand(pi)` | function | Registers `/diagnostics` for the first caller and returns `true`. Other callers receive `false`. |
 | `reporter.report(ctx, store, result)` | method | Shows issues in `result` that the session did not show yet. |
 | `store.extensionId` | `string` | Gives the owner extension ID. |
 | `store.path` | `string` | Gives the store's file path. |

@@ -4,7 +4,7 @@ import { isAbsolute, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createConfigStore, extensionConfigDir, field, formatConfigIssues, parsers, registerConfigReporting } from "@hcflabs/pi-config-store";
+import { createConfigStore, extensionConfigDir, field, formatConfigIssues, parsers, recordDiagnostic, registerConfigReporting } from "@hcflabs/pi-config-store";
 import { awaitShellPrompt, createHerdrClient, hasHerdrErrorCode, herdrCommandFailure } from "@hcflabs/pi-herdr";
 import { scanProcessLease } from "@hcflabs/pi-process";
 import { isWithin, resolveRepoTarget } from "@hcflabs/pi-repo";
@@ -420,18 +420,18 @@ export default function herdrCommandExtension(pi: ExtensionAPI, options: { agent
 				if (ctx.hasUI) ctx.ui.notify(text, "warning");
 				else process.stderr.write(`${text}\n`);
 			} catch (error) {
-				console.error(`herdr_command: job ${id} could not be restored: ${error instanceof Error ? error.message : String(error)} Evidence: ${directory}.`);
+				recordDiagnostic("pi-herdr-tools", "error", `herdr_command: job ${id} could not be restored: ${error instanceof Error ? error.message : String(error)} Evidence: ${directory}.`, ctx);
 			}
 		}
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (_event, ctx) => {
 		closed = true;
 		// A job does not outlive its session. Unproved stops keep their evidence in the job directory.
 		for (const job of jobs.values()) {
 			if (job.stopped) continue;
 			try { await stopJob(job); }
-			catch (error) { console.error(`herdr_command: ${error instanceof Error ? error.message : String(error)} Evidence: ${job.directory}.`); }
+			catch (error) { recordDiagnostic("pi-herdr-tools", "error", `herdr_command: ${error instanceof Error ? error.message : String(error)} Evidence: ${job.directory}.`, ctx); }
 		}
 		jobs.clear();
 	});

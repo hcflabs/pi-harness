@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { registerDiagnosticsCommand } from "@hcflabs/pi-config-store";
 import registerBtwExtension, { BTW_TASK } from "../internal/btw.ts";
 import herdrCloneExtension from "../internal/clone-tab.ts";
 import herdrCommandExtension from "../internal/command.ts";
@@ -9,6 +10,7 @@ import herdrRenameExtension, { RENAME_TASK } from "../internal/rename.ts";
 import { registerTaskModelsWarning } from "../internal/task-models.ts";
 
 export default async function herdrToolsExtension(pi: ExtensionAPI): Promise<void> {
+	registerDiagnosticsCommand(pi);
 	registerTaskModelsWarning(pi, [RENAME_TASK, BTW_TASK, RECAP_TASK]);
 	herdrRenameExtension(pi);
 	idleRecapExtension(pi);

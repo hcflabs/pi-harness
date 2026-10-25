@@ -20,6 +20,8 @@ Put the `codegraph` executable on Pi's `PATH`. Keep Pi's built-in MCP support en
 
 ## Use
 
+Use `/diagnostics` to read recent prerequisite warnings and seed failures that require a new index.
+
 Start `pi` in a linked worktree. If the primary checkout has no index, the TUI asks for indexing consent once per repository. Accept to run `codegraph init --yes` there. Alternatively, run this command in the primary checkout yourself:
 
 ```bash

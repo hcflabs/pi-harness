@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { recordDiagnostic, registerDiagnosticsCommand } from "@hcflabs/pi-config-store";
 import { Type } from "typebox";
 
 const LOCK_WAIT_MS = 5 * 60_000;
@@ -72,9 +73,10 @@ async function projectConfig(dir: string): Promise<string | undefined> {
 	}
 }
 
-// Copies the usable worktree index closest to this HEAD. `codegraph sync` then re-extracts
-// only the files that differ, which matches a fresh `codegraph init`.
-async function seedIndex(pi: ExtensionAPI, root: string, worktrees: string[], version: string, signal: AbortSignal): Promise<boolean> {
+type SeedResult = { seeded: true } | { seeded: false; reason: string };
+
+// Copy the compatible index closest to HEAD. CodeGraph sync then processes only the changed files.
+async function seedIndex(pi: ExtensionAPI, root: string, worktrees: string[], version: string, signal: AbortSignal): Promise<SeedResult> {
 	const config = await projectConfig(root);
 	// Probe one worktree at a time: repositories can keep many worker worktrees.
 	const candidates: { worktree: string; changes: number }[] = [];
@@ -86,13 +88,15 @@ async function seedIndex(pi: ExtensionAPI, root: string, worktrees: string[], ve
 		signal.throwIfAborted();
 		if (diff.code === 0 && !diff.killed) candidates.push({ worktree, changes: diff.stdout.split("\0").length });
 	}
+	let result: SeedResult = { seeded: false, reason: config === undefined ? "Cannot read the project config." : "No compatible seed index." };
 	for (const { worktree } of candidates.sort((a, b) => a.changes - b.changes)) {
-		if (await copyIndex(pi, worktree, root, signal)) return true;
+		result = await copyIndex(pi, worktree, root, signal);
+		if (result.seeded) return result;
 	}
-	return false;
+	return result;
 }
 
-async function copyIndex(pi: ExtensionAPI, source: string, root: string, signal: AbortSignal): Promise<boolean> {
+async function copyIndex(pi: ExtensionAPI, source: string, root: string, signal: AbortSignal): Promise<SeedResult> {
 	const target = join(root, ".codegraph", "codegraph.db");
 	const lock = join(source, ".codegraph", "codegraph.lock");
 	try {
@@ -101,9 +105,10 @@ async function copyIndex(pi: ExtensionAPI, source: string, root: string, signal:
 		await writeFile(lock, String(process.pid), { flag: "wx" });
 	} catch {
 		// A writer holds the source, or the source vanished.
-		return false;
+		return { seeded: false, reason: "Cannot acquire the seed lock." };
 	}
 	let copied = false;
+	let reason = "Cannot copy the seed index.";
 	try {
 		const db = new DatabaseSync(join(source, ".codegraph", "codegraph.db"), { readOnly: true });
 		try {
@@ -123,17 +128,18 @@ async function copyIndex(pi: ExtensionAPI, source: string, root: string, signal:
 		// CodeGraph decides whether the copy is complete and built by its current extraction engine.
 		const status = await pi.exec("codegraph", ["status", "--json", root], { cwd: root, timeout: 30_000, signal });
 		signal.throwIfAborted();
+		reason = "CodeGraph rejected the seed status.";
 		try {
 			const { index } = JSON.parse(status.stdout) as { index?: { state?: string; reindexRecommended?: boolean } };
-			if (status.code === 0 && index?.state === "complete" && index.reindexRecommended === false) return true;
+			if (status.code === 0 && !status.killed && index?.state === "complete" && index.reindexRecommended === false) return { seeded: true };
 		} catch {
-			// No usable status: treat the copy as unusable.
+			reason = "The seed status is not valid JSON.";
 		}
 	}
 	// codegraph init does not rebuild over an existing database.
 	await Promise.all(["", "-wal", "-shm"].map((suffix) => rm(`${target}${suffix}`, { force: true })));
 	signal.throwIfAborted();
-	return false;
+	return { seeded: false, reason };
 }
 
 // Waits for an exclusive initialization lock; `onWait` runs once when another session holds it.
@@ -202,8 +208,8 @@ async function initialize(pi: ExtensionAPI, ctx: ExtensionContext, signal: Abort
 		const detail = version.killed ? "timed out or killed" : version.stderr.trim().slice(-1000) || `exit ${version.code}`;
 		const message = `pi-codegraph: setup skipped.\ncodegraph --version failed (${detail}). Install CodeGraph: npm install -g @colbymchenry/codegraph. If already installed, check that codegraph runs on Pi's PATH.\nThen restart Pi or /reload.`;
 		ctx.ui.setStatus(STATUS_KEY, `${ctx.ui.theme.fg("warning", "!")} CG: prerequisites missing`);
+		recordDiagnostic("pi-codegraph", "warning", message, ctx);
 		if (ctx.hasUI) ctx.ui.notify(message, "warning");
-		else console.warn(message);
 		return;
 	}
 	const rootResult = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd: ctx.cwd, timeout: 10_000, signal });
@@ -262,9 +268,10 @@ async function initialize(pi: ExtensionAPI, ctx: ExtensionContext, signal: Abort
 				await rmdir(primaryLock);
 			}
 			attempted = true;
-			const seeded = await seedIndex(pi, root, paths, version.stdout.trim(), signal);
+			const seed = await seedIndex(pi, root, paths, version.stdout.trim(), signal);
 			signal.throwIfAborted();
-			await codegraph(pi, root, seeded ? ["sync"] : ["init", "--yes"], signal);
+			if (!seed.seeded) recordDiagnostic("pi-codegraph", "warning", `Seed failed: ${seed.reason} CodeGraph will run init.`);
+			await codegraph(pi, root, seed.seeded ? ["sync"] : ["init", "--yes"], signal);
 			indexed = true;
 			return root;
 		} catch (error) {
@@ -283,6 +290,7 @@ async function initialize(pi: ExtensionAPI, ctx: ExtensionContext, signal: Abort
 }
 
 export default function codegraphExtension(pi: ExtensionAPI): void {
+	registerDiagnosticsCommand(pi);
 	let initializer: AbortController | undefined;
 	let setup: Promise<void> | undefined;
 	pi.on("session_shutdown", (event) => {

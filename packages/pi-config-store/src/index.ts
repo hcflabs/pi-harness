@@ -4,6 +4,9 @@ import { chmod, mkdir, open, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { lock } from "proper-lockfile";
+import { recordDiagnostic } from "./diagnostics.ts";
+
+export { recordDiagnostic, readDiagnostics, registerDiagnosticsCommand, type DiagnosticLevel, type DiagnosticEvent } from "./diagnostics.ts";
 
 const MAX_CONFIG_BYTES = 64 * 1024;
 const EXTENSION_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -655,7 +658,7 @@ function reported(event?: { value: unknown }): Set<string> {
 
 /**
  * On each `session_start`, load every store and show one notification per file with issues:
- * `error` when the config is disabled, otherwise `warning`. Without UI, write the text to stderr.
+ * `error` when the config is disabled, otherwise `warning`. Without UI, write the diagnostic message to stderr.
  * Each issue shows once per session, across every reporter of every extension.
  */
 export function registerConfigReporting(pi: Pick<ExtensionAPI, "on">, stores: readonly ReportableConfig[]): ConfigReporter {
@@ -673,8 +676,8 @@ export function registerConfigReporting(pi: Pick<ExtensionAPI, "on">, stores: re
 			const text = disabled
 				? `${store.extensionId} disabled (${store.path}): ${formatConfigIssues(fresh)}`
 				: `${store.extensionId} config issues (${store.path}): ${formatConfigIssues(fresh)}; defaults replace invalid settings.`;
+			recordDiagnostic(store.extensionId, disabled ? "error" : "warning", text, ctx);
 			if (ctx.hasUI) ctx.ui.notify(text, disabled ? "error" : "warning");
-			else process.stderr.write(`${text}\n`);
 		},
 	};
 	pi.on("session_start", (event, ctx) => {
