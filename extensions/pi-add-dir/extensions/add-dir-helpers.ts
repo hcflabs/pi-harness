@@ -21,7 +21,7 @@ const SKIPPED_SEARCH_DIRS = new Set([".git", "node_modules"]);
 export const CONTEXT_FILE_BYTE_CAP = 65_536;
 
 type ContextFileReader = (filePath: string) => string | null;
-type ContextFileStat = (filePath: string) => { size: number; mtimeMs: number; ctimeMs: number };
+type ContextFileStat = (filePath: string) => { size: number; mtimeMs: number; ctimeMs: number; dev: number; ino: number };
 
 export function isMissingPathError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) return false;
@@ -171,8 +171,8 @@ export function createContextInjectionCache(
 				label,
 				files: CONTEXT_FILES.flatMap((name) => contextFilePaths(absolutePath, name)).map((filePath) => {
 					try {
-						const { size, mtimeMs, ctimeMs } = statFile(filePath);
-						return `${size}:${mtimeMs}:${ctimeMs}`;
+						const { size, mtimeMs, ctimeMs, dev, ino } = statFile(filePath);
+						return `${size}:${mtimeMs}:${ctimeMs}:${dev}:${ino}`;
 					} catch (error) {
 						if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "missing";
 						throw error;

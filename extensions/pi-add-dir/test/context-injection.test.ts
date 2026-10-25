@@ -74,7 +74,7 @@ test("each context file change invalidates the injection cache", async () => {
 test("the injection cache includes directory paths, labels, order, and count", () => {
 	let reads = 0;
 	const readFile = (filePath: string) => { reads += 1; return filePath; };
-	const statFile = () => ({ size: 10, mtimeMs: 20, ctimeMs: 30 });
+	const statFile = () => ({ size: 10, mtimeMs: 20, ctimeMs: 30, dev: 40, ino: 50 });
 	const cachedInjection = createContextInjectionCache({ readFile, statFile });
 	const first = { absolutePath: "/first", label: "first" };
 	const second = { absolutePath: "/second", label: "second" };
@@ -92,11 +92,11 @@ test("the injection cache includes directory paths, labels, order, and count", (
 
 test("each stat field invalidates the injection cache", () => {
 	let content = "initial";
-	const stat = { size: 10, mtimeMs: 20, ctimeMs: 30 };
+	const stat = { size: 10, mtimeMs: 20, ctimeMs: 30, dev: 40, ino: 50 };
 	const cachedInjection = createContextInjectionCache({ readFile: () => content, statFile: () => stat });
 	const dirs = [{ absolutePath: "/external", label: "external" }];
 	let previous = cachedInjection(dirs);
-	for (const field of ["size", "mtimeMs", "ctimeMs"] as const) {
+	for (const field of ["size", "mtimeMs", "ctimeMs", "dev", "ino"] as const) {
 		stat[field] += 1;
 		content = field;
 		const injection = cachedInjection(dirs);
@@ -122,7 +122,7 @@ test("stat errors other than ENOENT bypass the injection cache", () => {
 test("a failed read or a change during the build does not remain cached", () => {
 	let content: string | null = null;
 	let reads = 0;
-	const stat = { size: 10, mtimeMs: 20, ctimeMs: 30 };
+	const stat = { size: 10, mtimeMs: 20, ctimeMs: 30, dev: 40, ino: 50 };
 	const cachedInjection = createContextInjectionCache({
 		readFile: () => { reads += 1; return content; },
 		statFile: () => stat,
@@ -195,6 +195,67 @@ test("large context files read at most 64 KiB and end at a UTF-8 boundary", asyn
 	} finally {
 		t.mock.restoreAll();
 		syncBuiltinESMExports();
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("a new symlink target invalidates the cache when size and timestamps stay equal", async () => {
+	const dir = await mkdtemp(join(tmpdir(), "pi-add-dir-cache-retarget-"));
+	try {
+		await mkdir(join(dir, ".pi"));
+		const firstTarget = join(dir, "first.md");
+		const secondTarget = join(dir, "other.md");
+		await writeFile(firstTarget, "First instructions.\n");
+		await writeFile(secondTarget, "Other instructions.\n");
+		const timestamp = new Date("2020-01-01T00:00:00.000Z");
+		fs.utimesSync(firstTarget, timestamp, timestamp);
+		fs.utimesSync(secondTarget, timestamp, timestamp);
+		const firstStat = fs.statSync(firstTarget);
+		const secondStat = fs.statSync(secondTarget);
+		assert.equal(firstStat.size, secondStat.size);
+		assert.equal(firstStat.mtimeMs, secondStat.mtimeMs);
+		assert.notDeepEqual([firstStat.dev, firstStat.ino], [secondStat.dev, secondStat.ino]);
+
+		// utimesSync cannot set ctime. Keep it equal through the stat seam.
+		const statFile = (filePath: string) => ({ ...fs.statSync(filePath), ctimeMs: firstStat.ctimeMs });
+		const dirs = [{ absolutePath: dir, label: "external" }];
+		for (const name of contextNames) {
+			const contextPath = join(dir, name);
+			await symlink(firstTarget, contextPath);
+			let reads = 0;
+			const cachedInjection = createContextInjectionCache({
+				statFile,
+				readFile(filePath) {
+					reads += 1;
+					return readFileSafe(filePath);
+				},
+			});
+			const firstFingerprint = statFile(contextPath);
+			const first = cachedInjection(dirs);
+			assert.equal(cachedInjection(dirs), first);
+			assert.equal(reads, 4);
+
+			await rm(contextPath);
+			await symlink(secondTarget, contextPath);
+			const secondFingerprint = statFile(contextPath);
+			assert.deepEqual(
+				[firstFingerprint.size, firstFingerprint.mtimeMs, firstFingerprint.ctimeMs],
+				[secondFingerprint.size, secondFingerprint.mtimeMs, secondFingerprint.ctimeMs],
+			);
+			assert.notDeepEqual(
+				[firstFingerprint.dev, firstFingerprint.ino],
+				[secondFingerprint.dev, secondFingerprint.ino],
+			);
+			const changed = cachedInjection(dirs);
+			assert.notEqual(changed, first);
+			assert.equal(changed, buildContextInjection(dirs));
+			assert.match(changed, /Other instructions/);
+			assert.equal(reads, 8);
+			assert.equal(cachedInjection(dirs), changed);
+			assert.equal(reads, 8);
+			await rm(contextPath);
+		}
+	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
 });
