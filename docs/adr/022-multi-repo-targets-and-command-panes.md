@@ -1,7 +1,8 @@
 # 022. Multi-Repo Targets and Command Panes
 
-- **Status:** proposed
+- **Status:** accepted
 - **Date:** 2026-10-23
+- **Updated:** 2026-10-25. [ADR 019](019-pi-subagent-orchestration.md) owns the delegation rules and [ADR 021](021-herdr-workflow-consolidation.md) owns the handoff and completion rules. This ADR keeps the shared repository and command-pane decisions.
 
 ## Context
 
@@ -64,17 +65,10 @@ The extensions do not find or create a primary repository workspace. Herdr does 
 - Isolated worker worktrees open with `worktree open --cwd <primary>`. The caller's workspace does not need to belong to the target repository.
 - `herdr_handoff` creates its worktree with `worktree create --cwd <repo>`.
 
-### Direct delegation
+### Delegation, handoff, and completion
 
-A direct request accepts `repo` at the request level and on each task. A task value overrides the request value. The worker cwd, checkout snapshot, and change report use the selected target.
-
-Checkout admission changes from one key to a scope:
-
-- A direct request reserves the set of target checkouts of its tasks. It takes all reservations at one time, before its first worker starts.
-- Direct requests on different checkouts can run at the same time.
-- From a non-Git parent, each Main call that can write covers the whole parent subtree. It conflicts with every reserved child checkout. Code does not try to parse Bash text for a directory.
-
-A continuation must select the same Repository target as the recorded worker.
+- [ADR 019](019-pi-subagent-orchestration.md) owns Repository targets in direct and isolated delegation, scoped checkout admission, the Full suite, run state version 6, and child tool exclusion.
+- [ADR 021](021-herdr-workflow-consolidation.md) owns `herdr_handoff` with `repo` and workspace-based `/done`.
 
 ### Long-running Main activity
 
@@ -97,41 +91,8 @@ Rules:
 - A `write` job reports checkout activity until it stops.
 - Pane output is untrusted text. It is not evidence for isolated validation.
 
-### Handoff and completion
-
-- `herdr_handoff` accepts an optional `repo`. With `repo`, it runs its Git checks in that repository and creates the worktree with `--cwd`. Without `repo`, it keeps its earlier checks.
-- The `herdr_handoff` guidance changes from "only when the user asks" to use within the authorized scope of the user. It must state that a handoff has no checked integration.
-- `/done` gets its checkout from the Herdr workspace of the current pane, not from the Pi working directory. It refuses a workspace that is not a linked worktree.
-
-### Child tool exclusion
-
-Delegated workers cannot use `herdr_handoff` or `herdr_command`. A worker cannot start agents or command jobs outside its own lease and budget.
-
-### Isolated delegation (amends ADR 019)
-
-- An isolated request accepts one request-level `repo`. Tasks cannot select a different repository. The status, resume, stage, integrate, and abort tools accept the same `repo`.
-- State, productive leases, and active controls stay keyed by the canonical target root. Work in one child repository does not block another.
-- Promotion updates the target checkout. It never changes the Pi working directory.
-- `/subagent` groups requests by repository and shows the repository with each request ID.
-
-The **Full suite** is the one check that each changeset graph must pass at validation. Admission selects it in this order:
-
-1. The `repoSuites` entry in `config/pi-subagent/config.json`, keyed by the canonical primary checkout path.
-2. `pnpm test`, when the root `package.json` has a non-empty `scripts.test`.
-3. `make test`, when the root `Makefile` declares a literal `test` target.
-
-If no source applies, admission fails before it saves state. A read or parse error is a failure, not an absent source. Code reads the `Makefile` as text and never runs `make` to find targets, because Make can run repository code. An invalid `repoSuites` value disables delegation ([ADR 004](004-extension-config-safety.md)), so a bad entry cannot select a different suite.
-
-Admission saves the selected command and its source with the request. Validation, resume, and recovery use the saved suite. A later config change does not change an admitted request. Validation rejects a candidate that changes the selected `package.json` test script or `Makefile`.
-
-The saved suite is required, so the run state version changes from 5 to 6. Version 6 rejects version 5 files and does not migrate them silently.
-
 ## Consequences
 
 - Users can start Pi in a parent directory and delegate to, hand off from, and run commands in its child repositories.
-- Non-Node repositories can use isolated changesets.
-- `pi-subagent` needs a major release because of state version 6. Users must finish or recover isolated requests before they upgrade.
-- From a non-Git parent, any Main Bash call waits while a direct writer owns a child checkout. Main can still read files and use tools that select a target.
 - Herdr can create a primary workspace for a repository as a side effect. The extensions do not close it.
 - `herdr_command` gives Main a new way to run processes. It does not authorize push, publication, or deployment. It is not a sandbox.
-- When this ADR is accepted, ADR 019 and ADR 021 take its rules, and this ADR keeps only the shared repository and command-pane decisions.
