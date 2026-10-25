@@ -369,7 +369,7 @@ export default function herdrCommandExtension(pi: ExtensionAPI, options: { agent
 				endActivity(job);
 				throw new Error("herdr_command: the session ended during start. The pane was closed; no command was started.");
 			}
-			const ready = await awaitShellPrompt(herdr, paneId, { cwd }, undefined, true);
+			const ready = await awaitShellPrompt(herdr, paneId, { cwd }, undefined, true, true);
 			if (ready) {
 				await herdr.exec(["pane", "close", paneId], { cwd });
 				jobs.delete(id);

@@ -1,6 +1,6 @@
 {
   "name": "@hcflabs/pi-herdr-tools",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Clone, hand off, name, and finish Pi conversations in Herdr, with mergeable side questions.",
   "keywords": ["pi-package", "pi", "herdr", "session", "clone", "side-thread", "title"],
   "type": "module",
@@ -20,7 +20,7 @@
   },
   "dependencies": {
     "@hcflabs/pi-config-store": "^4.2.0",
-    "@hcflabs/pi-herdr": "^0.6.0",
+    "@hcflabs/pi-herdr": "^0.7.0",
     "@hcflabs/pi-process": "^0.3.0",
     "@hcflabs/pi-repo": "^0.1.0",
     "@hcflabs/pi-task-models": "^9.0.0"
