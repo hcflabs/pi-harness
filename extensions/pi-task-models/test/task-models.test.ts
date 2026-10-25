@@ -1432,3 +1432,29 @@ test("registers one Task Profile Model for each profile and routes it from the c
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("a Task Profile Model skips a Task Route that names another virtual model", () => {
+	const dir = tempDir();
+	try {
+		const virtualModels: any[] = [];
+		registerTaskProfileModels({ registerVirtualModel: (model: unknown) => virtualModels.push(model) } as never, { agentDir: dir });
+		// Pi rejects a route to a virtual model: "Virtual model task/fast routed to alias/haiku, which is not a physical model."
+		const alias = routeModel("alias", "haiku", { api: "pi-virtual" });
+		const fallback = routeModel("route-virtual", "haiku");
+		const ctx = { modelRegistry: { getAvailable: () => [alias, fallback] } };
+		mkdirSync(join(dir, "config", "pi-task-models"), { recursive: true });
+		writeFileSync(configFile(dir), JSON.stringify({
+			profiles: {
+				fast: {
+					primary: { model: "alias/haiku", thinkingLevel: "medium" },
+					fallback: { model: "route-virtual/haiku", thinkingLevel: "medium" },
+				},
+			},
+		}));
+		const fast = virtualModels.find(({ id }) => id === "fast");
+		assert.deepEqual(fast.route({ reason: "user" }, ctx), { model: fallback, thinkingLevel: "medium" });
+		assert.deepEqual(availableTaskModels({ model: undefined, scopedModels: [], modelRegistry: ctx.modelRegistry } as any), [fallback]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});

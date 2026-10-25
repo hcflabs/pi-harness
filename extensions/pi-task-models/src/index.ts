@@ -291,8 +291,9 @@ export function availableTaskModels(ctx: TaskModelContext): AvailableModel[] {
 	const scopedModels = ctx.scopedModels;
 	return dedupeAvailableModels(
 		(scopedModels.length ? scopedModels.map(({ model }) => model) : ctx.modelRegistry.getAvailable())
-			// A Task Profile Model routes to Task Routes, so a Task Route cannot name one.
-			.filter((model) => model.input.includes("text") && model.provider !== TASK_MODEL_PROVIDER),
+			// Pi routes a virtual model only to a physical model. A Task Route cannot name a virtual model,
+			// for example a Task Profile Model or an alias model of another extension.
+			.filter((model) => model.input.includes("text") && model.provider !== TASK_MODEL_PROVIDER && model.api !== VIRTUAL_MODEL_API),
 		ctx.model?.provider,
 	);
 }
@@ -479,6 +480,9 @@ export async function executeTaskRoutes<T>(
 export function orderedProfileRoutes(profile: TaskModelProfile): TaskModelRoute[] {
 	return profile.fallback ? [profile.primary, profile.fallback] : [profile.primary];
 }
+
+/** Pi's VIRTUAL_MODEL_API. Pi does not export it from the package entry. */
+const VIRTUAL_MODEL_API = "pi-virtual";
 
 /** Provider of the Task Profile Models `task/<profile>`. */
 export const TASK_MODEL_PROVIDER = "task";
