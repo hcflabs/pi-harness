@@ -64,6 +64,8 @@ const STALLED_PROMPT_POLL_MS = 250;
 const DEFAULT_SETTLED_IDLE_MS = 600_000;
 const HOST_LAYOUT_POLL_MS = 50;
 const HOST_LAYOUT_MAX_POLLS = 40;
+const SHELL_IDLE_POLL_MS = 100;
+const SHELL_IDLE_MAX_POLLS = 100;
 const DIAGNOSTIC_LIMIT = 8 * 1024;
 const LEASE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
@@ -982,7 +984,7 @@ export class HerdrHostRuntime implements HostRuntime {
 		if ((await this.scanLease(allocation.leasePath, allocation.worktreeCwd, context)).length) {
 			throw new Error("Agent start requires an empty exact process lease.");
 		}
-		await this.assertStartableAgentPane(allocation, context, { requireExclusiveTty: false });
+		await this.assertStartableAgentPane(allocation, context, { requireExclusiveTty: false, awaitIdleShell: true });
 		const options = this.processOptions(allocation.worktreeCwd, context, HERDR_OPERATION_CAP_MS);
 		const handle = await acquireLaunch();
 		return await withTransientLaunch(handle, async (launch) => {
@@ -1192,7 +1194,7 @@ export class HerdrHostRuntime implements HostRuntime {
 	private async assertStartableAgentPane(
 		allocation: AgentAllocationIntent,
 		context: OperationContext,
-		options: { requireExclusiveTty: boolean },
+		options: { requireExclusiveTty: boolean; awaitIdleShell?: boolean },
 	): Promise<void> {
 		const paneResponse = await this.herdr.json(
 			["pane", "get", allocation.paneId],
@@ -1209,26 +1211,42 @@ export class HerdrHostRuntime implements HostRuntime {
 			throw new Error("The exact saved agent pane is not empty and startable in its owned worktree.");
 		}
 
-		const processResponse = await this.herdr.json(
-			["pane", "process-info", "--pane", allocation.paneId],
-			this.processOptions(allocation.worktreeCwd, context, HERDR_OPERATION_CAP_MS),
-		);
-		const processResult = resultRecord(processResponse, "Herdr agent pane process-info response");
-		if (processResult.type !== "pane_process_info") throw new Error("Herdr agent pane process-info response has the wrong type.");
-		const processInfo = record(processResult.process_info, "Herdr agent pane process-info");
-		const shellPid = processInfo.shell_pid;
-		const foreground = processInfo.foreground_processes;
-		if (exactString(processInfo.pane_id, "Herdr agent process pane ID") !== allocation.paneId
-			|| !Number.isSafeInteger(shellPid) || Number(shellPid) <= 0
-			|| processInfo.foreground_process_group_id !== shellPid
-			|| !Array.isArray(foreground) || foreground.length !== 1) {
-			throw new Error("The exact saved agent pane process state is not an idle foreground shell.");
+		let shellPid: unknown;
+		for (let poll = 0; ; poll += 1) {
+			const processResponse = await this.herdr.json(
+				["pane", "process-info", "--pane", allocation.paneId],
+				this.processOptions(allocation.worktreeCwd, context, HERDR_OPERATION_CAP_MS),
+			);
+			const processResult = resultRecord(processResponse, "Herdr agent pane process-info response");
+			if (processResult.type !== "pane_process_info") throw new Error("Herdr agent pane process-info response has the wrong type.");
+			const processInfo = record(processResult.process_info, "Herdr agent pane process-info");
+			if (exactString(processInfo.pane_id, "Herdr agent process pane ID") !== allocation.paneId) {
+				throw new Error("The exact saved agent pane process state is not an idle foreground shell.");
+			}
+			shellPid = processInfo.shell_pid;
+			const foreground = processInfo.foreground_processes;
+			const idleGroup = Number.isSafeInteger(shellPid) && Number(shellPid) > 0
+				&& processInfo.foreground_process_group_id === shellPid
+				&& Array.isArray(foreground) && foreground.length === 1;
+			const shell = idleGroup ? record(foreground[0], "Herdr agent pane foreground process") : undefined;
+			if (shell && shell.pid === shellPid && shell.cwd === allocation.worktreeCwd) {
+				exactString(shell.name, "Herdr agent pane shell name");
+				break;
+			}
+			if (!options.awaitIdleShell) {
+				if (!idleGroup) throw new Error("The exact saved agent pane process state is not an idle foreground shell.");
+				throw new Error("The exact saved agent pane foreground process is not its owned idle shell.");
+			}
+			if (poll + 1 >= SHELL_IDLE_MAX_POLLS) {
+				const processes = Array.isArray(foreground)
+					? foreground.slice(0, 20).map((process) => `${process?.pid}:${process?.name}`).join(", ")
+					: "malformed";
+				const diagnostic = safeText(`shell_pid=${shellPid}, foreground_process_group_id=${processInfo.foreground_process_group_id}, foreground=[${processes}]`);
+				throw new Error(`The exact saved agent pane process state is not an idle foreground shell. ${diagnostic}`);
+			}
+			// Only fresh allocation waits for shell startup. Recovery requires an immediate safety proof.
+			await this.delay(SHELL_IDLE_POLL_MS, context.signal);
 		}
-		const shell = record(foreground[0], "Herdr agent pane foreground process");
-		if (shell.pid !== shellPid || shell.cwd !== allocation.worktreeCwd) {
-			throw new Error("The exact saved agent pane foreground process is not its owned idle shell.");
-		}
-		exactString(shell.name, "Herdr agent pane shell name");
 		if (!options.requireExclusiveTty) return;
 
 		// Herdr's foreground list excludes background jobs, so recovery inventories every process on the shell's controlling TTY.
