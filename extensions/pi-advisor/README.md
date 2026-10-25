@@ -39,7 +39,7 @@ The record contains:
 - Start time and the route model that answered, or `none` if no route answered.
 - Failed route models and safe error codes.
 - Total duration in milliseconds.
-- Cost in USD when the response usage contains a known cost. The status omits unknown cost.
+- Cost in USD, summed across failed and successful routes with known, finite, non-negative response costs. The status omits cost when none is known.
 - Verdict: `pass`, `nit`, `concern`, `blocker`, `malformed`, `failed`, `aborted`, or `discarded`. An active review shows `reviewing`.
 
 The verdict uses the strongest Grade in the delivered Notes. A held Blocker remains `blocker`. The status also shows the session's malformed response count.

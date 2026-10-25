@@ -139,9 +139,9 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 			maxRetries: 0,
 			...(route.thinkingLevel === "off" ? {} : { reasoning: route.thinkingLevel }),
 		}).result();
-		if (response.stopReason !== "stop") throw new Error(response.errorMessage || `the model stopped with ${response.stopReason}.`);
 		const cost = response.usage?.cost?.total;
-		if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) record.costUsd = cost;
+		if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) record.costUsd = (record.costUsd ?? 0) + cost;
+		if (response.stopReason !== "stop") throw new Error(response.errorMessage || `the model stopped with ${response.stopReason}.`);
 		return response.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
 	}, {
 		signal, shouldFallback: () => true,
