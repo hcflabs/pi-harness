@@ -123,7 +123,7 @@ Applying a preset can create missing active config. Config problems require conf
 | `ResolvedTaskRoute` | type | Session-resolved model and thinking level. |
 | `TaskRouteErrorCode` | type | Route failure code. |
 | `TaskRouteError` | type | Error with code and optional profile name. |
-| `TaskRouteAttempt` | type | Frozen record for one executed route, with model, outcome, duration, and optional error fields. |
+| `TaskRouteAttempt` | type | Frozen record for one executed route, with model, outcome, duration, and an optional bounded error code. |
 | `registerModelTask(pi, task)` | function | Registers a consumer declaration at extension load. |
 | `loadTaskModelsConfig(agentDir?)` | function | Reads and validates config; throws when disabled. |
 | `registerTaskModelsConfigReporting(pi, agentDir?)` | function | Reports problems at session start; returns `report(ctx)` for later problems. |
@@ -148,7 +148,7 @@ Consumers must not read or write shared config directly. Register `registerTaskM
 
 `executeTaskRoutes()` only executes supplied routes. It does not resolve, authenticate, inspect providers, store logs, or retry routes. It rejects empty lists and checks `signal` before each route. Cancellation or `shouldFallback(error) === false` stops execution. Allowed failures end with the final error unchanged. Each route call must be atomic and safe to repeat.
 
-The optional `onAttempt(record)` receives one frozen `TaskRouteAttempt` after each executed route, including the last route. Routes cancelled before execution produce no record. A record contains no route result or request data. Consumers must keep prompts, messages, reviews, and model output out of error messages used for diagnostics.
+The optional `onAttempt(record)` receives one frozen `TaskRouteAttempt` after each executed route, including the last route. Routes cancelled before execution produce no record. A record contains no route result, request data, or error message text. The executor never copies error messages or thrown strings into records.
 
 | Field | Meaning |
 | --- | --- |
@@ -156,10 +156,17 @@ The optional `onAttempt(record)` receives one frozen `TaskRouteAttempt` after ea
 | `model` | Actual resolved `provider/id`, including a numbered Codex provider when selected. |
 | `outcome` | `succeeded`, `failed`, or `aborted`. An aborted signal or an `AbortError` marks a rejected route as `aborted`. |
 | `durationMs` | Elapsed route execution time in milliseconds. |
-| `errorCode` | Failure code from `taskRouteCode`, then `error.code`, then `error.name`. Uses `error` if none exists. |
-| `error` | Failure message on one line, limited to 300 characters. |
+| `errorCode` | Bounded failure code. Uses `error` when no accepted code, status, or name exists. |
 
-Successful records omit `errorCode` and `error`. The observer can return a promise, but execution does not wait for it. The executor catches and ignores observer failures. Observer failures do not change route results or fallback decisions.
+The executor selects `errorCode` in this order:
+
+1. Use a non-empty string `taskRouteCode` on one line, limited to 64 characters.
+2. Use a non-empty string `error.code` on one line, limited to 64 characters.
+3. Use a finite numeric `error.status` as `http-<status>`.
+4. Use `error.name` only if it matches `/^[A-Za-z][A-Za-z0-9_]{0,63}$/`.
+5. Use `error` otherwise.
+
+Successful records omit `errorCode`. The observer can return a promise, but execution does not wait for it. The executor catches and ignores observer failures. Observer failures do not change route results or fallback decisions.
 
 ## Limits and recovery
 

@@ -382,26 +382,33 @@ export function resolveConfiguredTaskRoute(
 	return resolveConfiguredTaskRoutes(ctx, task, agentDir, thinking)[0];
 }
 
+/** A frozen route record with no request data, route result, or error message text. */
 export type TaskRouteAttempt = Readonly<{
 	routeIndex: number;
 	model: string;
 	outcome: "succeeded" | "failed" | "aborted";
 	durationMs: number;
 	errorCode?: string;
-	error?: string;
 }>;
 
 function singleLine(text: string): string {
 	return text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
 }
 
-function attemptError(error: unknown): { errorCode: string; error: string } {
+function attemptError(error: unknown): { errorCode: string } {
 	const fields = error && typeof error === "object" ? error as Record<string, unknown> : {};
-	const code = [fields.taskRouteCode, fields.code, fields.name]
-		.find((value) => (typeof value === "string" && value.length > 0) || typeof value === "number");
+	for (const code of [fields.taskRouteCode, fields.code]) {
+		if (typeof code !== "string") continue;
+		const bounded = singleLine(code).slice(0, 64);
+		if (bounded) return { errorCode: bounded };
+	}
+	if (typeof fields.status === "number" && Number.isFinite(fields.status)) {
+		return { errorCode: `http-${fields.status}` };
+	}
 	return {
-		errorCode: code === undefined ? "error" : singleLine(String(code)),
-		error: singleLine(typeof fields.message === "string" ? fields.message : errorMessage(error)).slice(0, 300),
+		errorCode: typeof fields.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(fields.name)
+			? fields.name
+			: "error",
 	};
 }
 

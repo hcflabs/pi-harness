@@ -17,7 +17,7 @@ One model reference and thinking level resolved against Pi's available text mode
 _Avoid_: free-form provider path, copied model metadata
 
 **Task Route Attempt**:
-A frozen record for one executed Task Route. It contains the route index, resolved model reference, outcome, duration, and optional bounded error fields. It contains no request data or route result.
+A frozen record for one executed Task Route. It contains the route index, resolved model reference, outcome, duration, and an optional bounded error code. It contains no request data, route result, or error message text.
 _Avoid_: prompt log, model output log
 
 **Task model status**:

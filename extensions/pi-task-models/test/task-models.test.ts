@@ -903,7 +903,7 @@ test("executes approved fallback routes serially and reports each attempt", asyn
 	assert.equal(await result, "fallback");
 	assert.deepEqual(attempts, ["primary", "fallback"]);
 	assert.deepEqual(records.map(({ durationMs, ...record }) => record), [
-		{ routeIndex: 0, model: "test/primary", outcome: "failed", errorCode: "no-route", error: "primary failed" },
+		{ routeIndex: 0, model: "test/primary", outcome: "failed", errorCode: "no-route" },
 		{ routeIndex: 1, model: "test/fallback", outcome: "succeeded" },
 	]);
 	for (const record of records) {
@@ -929,17 +929,32 @@ test("rethrows the exact final route error and reports it", async () => {
 	);
 	assert.equal(attempt, 2);
 	assert.equal(fallbackChecks, 1);
-	assert.deepEqual(records.map(({ errorCode, error, outcome, routeIndex }) => ({ errorCode, error, outcome, routeIndex })), [
-		{ errorCode: "Error", error: "first failed", outcome: "failed", routeIndex: 0 },
-		{ errorCode: "Error", error: "final failed", outcome: "failed", routeIndex: 1 },
+	assert.deepEqual(records.map(({ errorCode, outcome, routeIndex }) => ({ errorCode, outcome, routeIndex })), [
+		{ errorCode: "Error", outcome: "failed", routeIndex: 0 },
+		{ errorCode: "Error", outcome: "failed", routeIndex: 1 },
 	]);
 });
 
-test("reports bounded error messages and codes without result text", async () => {
-	for (const [error, code, message] of [
-		[Object.assign(new Error(`first\r\nsecond\t${"x".repeat(350)}`), { code: "E_TEST" }), "E_TEST", `first second ${"x".repeat(350)}`.slice(0, 300)],
-		[{ name: "CustomError", message: "custom message", output: "private output" }, "CustomError", "custom message"],
-		["text failure\nnext", "error", "text failure next"],
+test("reports bounded error codes without message or result text", async () => {
+	for (const [error, code] of [
+		[Object.assign(new Error("private message"), { taskRouteCode: "no-route", code: "E_TEST", status: 503 }), "no-route"],
+		[{ code: "E_TEST", status: 503, name: "CustomError" }, "E_TEST"],
+		[{ code: 503, status: 429, name: "CustomError" }, "http-429"],
+		[{ status: 503, name: "CustomError" }, "http-503"],
+		[{ status: Number.NaN, name: "CustomError" }, "CustomError"],
+		[{ status: Number.POSITIVE_INFINITY }, "error"],
+		[{ status: "503", code: 503 }, "error"],
+		[{ name: "CustomError", message: "private message", output: "private output" }, "CustomError"],
+		[{ name: "Custom_Error2" }, "Custom_Error2"],
+		[{ name: "secret prompt" }, "error"],
+		[{ name: "Error\nsecret" }, "error"],
+		[{ name: "2Error" }, "error"],
+		[{ name: "E".repeat(64) }, "E".repeat(64)],
+		[{ name: "E".repeat(65) }, "error"],
+		[{ code: `E_TEST\r\n${"x".repeat(100)}` }, `E_TEST ${"x".repeat(57)}`],
+		[{ taskRouteCode: "x".repeat(100) }, "x".repeat(64)],
+		[{ code: "", name: "CustomError" }, "CustomError"],
+		["text failure\nnext", "error"],
 	] as const) {
 		const records: TaskRouteAttempt[] = [];
 		await assert.rejects(executeTaskRoutes(EXECUTION_ROUTES.slice(0, 1), async () => { throw error; }, {
@@ -947,9 +962,10 @@ test("reports bounded error messages and codes without result text", async () =>
 			onAttempt(record) { records.push(record); },
 		}), (caught) => caught === error);
 		assert.equal(records.length, 1);
-		assert.deepEqual(Object.keys(records[0]!).sort(), ["durationMs", "error", "errorCode", "model", "outcome", "routeIndex"]);
+		assert.deepEqual(Object.keys(records[0]!).sort(), ["durationMs", "errorCode", "model", "outcome", "routeIndex"]);
 		assert.equal(records[0]!.errorCode, code);
-		assert.equal(records[0]!.error, message);
+		assert.ok(records[0]!.errorCode!.length <= 64);
+		assert.doesNotMatch(JSON.stringify(records), /private message|private output|secret prompt|text failure/);
 	}
 	const records: TaskRouteAttempt[] = [];
 	const result = { output: "private output" };
@@ -958,6 +974,23 @@ test("reports bounded error messages and codes without result text", async () =>
 	}), result);
 	assert.deepEqual(Object.keys(records[0]!).sort(), ["durationMs", "model", "outcome", "routeIndex"]);
 	assert.equal(records.length, 1);
+});
+
+test("never copies error message text or thrown strings into route records", async () => {
+	const records: TaskRouteAttempt[] = [];
+	const failures = [new Error("secret prompt"), "secret prompt"];
+	let calls = 0;
+	await assert.rejects(executeTaskRoutes(EXECUTION_ROUTES, async () => { throw failures[calls++]; }, {
+		shouldFallback: () => true,
+		onAttempt(record) { records.push(record); },
+	}), (error) => error === failures[1]);
+	assert.equal(records.length, 2);
+	assert.deepEqual(records.map(({ errorCode }) => errorCode), ["Error", "error"]);
+	for (const record of records) {
+		assert.ok(Object.isFrozen(record));
+		assert.equal(Object.hasOwn(record, "error"), false);
+		assert.doesNotMatch(JSON.stringify(record), /secret prompt/);
+	}
 });
 
 test("ignores synchronous and asynchronous observer failures without changing route results", async () => {
@@ -1001,7 +1034,7 @@ test("reports aborted attempts but not routes cancelled before execution", async
 		}), (error) => error === failure);
 		assert.equal(records.length, 1);
 		assert.equal(records[0]!.outcome, "aborted");
-		assert.equal(records[0]!.error, "attempt cancelled");
+		assert.equal(records[0]!.errorCode, "Error");
 		assert.equal(records[0]!.model, `test/${routes[0].model.id}`);
 	}
 });
@@ -1021,7 +1054,7 @@ test("reports AbortError without a signal and preserves fallback policy errors",
 		shouldFallback: () => { throw policyError; }, onAttempt(record) { records.push(record); },
 	}), (error) => error === policyError);
 	assert.equal(records.length, 1);
-	assert.equal(records[0]!.error, "primary failed");
+	assert.equal(records[0]!.errorCode, "Error");
 });
 
 test("rejects an empty route list", async () => {
