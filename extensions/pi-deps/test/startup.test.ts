@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setImmediate } from "node:timers/promises";
@@ -7,13 +7,13 @@ import test, { type TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import depsExtension from "../extensions/deps.ts";
 
-async function fixture(t: TestContext, status: object = { state: "running" }) {
+async function fixture(t: TestContext, status: object | string = { state: "running" }) {
 	const gitDir = await mkdtemp(join(tmpdir(), "pi-deps-startup-"));
 	t.after(() => rm(gitDir, { recursive: true, force: true }));
 	const stateDir = join(gitDir, "pi-deps");
 	const statusPath = join(stateDir, "status.json");
 	await mkdir(stateDir);
-	await writeFile(statusPath, JSON.stringify(status));
+	await writeFile(statusPath, typeof status === "string" ? status : JSON.stringify(status));
 	const handlers = new Map<string, (event: unknown, ctx: ExtensionContext) => Promise<void> | void>();
 	const ready = Promise.withResolvers<void>();
 	const cleared = Promise.withResolvers<void>();
@@ -98,4 +98,46 @@ test("the ten-minute watch limit clears the spinner and explains how to check th
 	await run.cleared;
 	assert.match(run.widgets[0]![0]!, /stopped waiting.*ten minutes.*check the log/);
 	assert.match(run.widgets[0]![1]!, /install\.log$/);
+});
+
+test("a partial status write that completes before the bound clears silently", async (t) => {
+	const run = await fixture(t, "{");
+	await run.start();
+	await run.ready; // the first read saw a parse error and kept waiting
+	await writeFile(run.statusPath, JSON.stringify({ state: "ok" }));
+	await run.cleared;
+	assert.deepEqual(run.widgets, []);
+	assert.deepEqual(run.notices, []);
+	await assert.rejects(readFile(run.statusPath), { code: "ENOENT" });
+});
+
+test("a status file that stays invalid stops after three reads with one warning", async (t) => {
+	const run = await fixture(t, "{");
+	const startedAt = Date.now();
+	await run.start();
+	await run.cleared;
+	assert.ok(Date.now() - startedAt >= 900, "the watcher retries a parse error before it stops");
+	assert.deepEqual(run.widgets, [[`pi-deps: cannot read status file ${run.statusPath}: SyntaxError`]]);
+	assert.deepEqual(run.notices, []);
+	assert.equal(await readFile(run.statusPath, "utf8"), "{");
+});
+
+test("a status path that is a directory stops at once with EISDIR and keeps the path", async (t) => {
+	const run = await fixture(t);
+	await rm(run.statusPath);
+	await mkdir(run.statusPath);
+	await run.start();
+	await run.cleared;
+	assert.deepEqual(run.statuses, [undefined]); // no spinner before the warning
+	assert.deepEqual(run.widgets, [[`pi-deps: cannot read status file ${run.statusPath}: EISDIR`]]);
+	assert.ok((await stat(run.statusPath)).isDirectory());
+});
+
+test("a status file without read permission stops at once with EACCES", { skip: process.getuid?.() === 0 && "root reads any file" }, async (t) => {
+	const run = await fixture(t);
+	await chmod(run.statusPath, 0o000);
+	await run.start();
+	await run.cleared;
+	assert.deepEqual(run.statuses, [undefined]);
+	assert.deepEqual(run.widgets, [[`pi-deps: cannot read status file ${run.statusPath}: EACCES`]]);
 });
