@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { DEFAULT_SYNC_CAP, getPreparationRows, getSessionRows, searchIndex, syncSessions } from "../extensions/search-core.ts";
+import { closeIndexDatabases, DEFAULT_SYNC_CAP, getPreparationRows, getSessionRows, searchIndex, syncSessions } from "../extensions/search-core.ts";
 import { buildFtsQueryPlan, MAX_QUERY_CHARS } from "../extensions/query.ts";
 import { readBoundedSnapshot } from "../extensions/transcript.ts";
 import { getWindow } from "../extensions/hydrate.ts";
@@ -26,6 +26,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	closeIndexDatabases();
 	fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -162,6 +163,219 @@ describe("sync + BM25 search", () => {
 		assert.equal(r3.filesProcessed, 1);
 		assert.equal(r3.backlogRemaining, 0);
 		assert.ok(searchIndex(dbPath, `"capfile0"`).hits.length === 1);
+	});
+});
+
+/** Indexed state of one session file, read through a separate connection. */
+function indexedFile(db: string, file: string) {
+	const check = new DatabaseSync(db, { readOnly: true });
+	try {
+		const session = check.prepare("SELECT cwd, name, started_at, preview, parent_session FROM sessions WHERE path = ?").get(file);
+		const rows = check.prepare("SELECT rowid, entry_id, role, timestamp, head, tail FROM messages WHERE path = ? ORDER BY rowid").all(file) as any[];
+		return {
+			session: session ? { ...session } : undefined,
+			messages: rows.map(({ rowid: _rowid, ...row }) => ({ ...row })),
+			rowids: rows.map((row) => Number(row.rowid)),
+			appendState: check.prepare("SELECT count(*) AS n FROM session_append_state WHERE path = ?").get(file)?.n,
+		};
+	} finally {
+		check.close();
+	}
+}
+
+/** Index the same tree into a new database: the full-rebuild reference. */
+let rebuilds = 0;
+function rebuiltFile(file: string) {
+	const fresh = path.join(tmp, `rebuild-${++rebuilds}.db`);
+	syncSessions(sessionsDir, fresh, { cap: 1000 });
+	return indexedFile(fresh, file);
+}
+
+function assertFtsIntegrity(db: string): void {
+	const check = new DatabaseSync(db);
+	try {
+		check.exec("INSERT INTO session_fts(session_fts) VALUES('integrity-check')");
+	} finally {
+		check.close();
+	}
+}
+
+/** Count JSON.parse calls on session header lines while fn runs. */
+function countHeaderParses(fn: () => void): number {
+	const realParse = JSON.parse;
+	let headers = 0;
+	JSON.parse = ((text: string, reviver?: any) => {
+		if (typeof text === "string" && text.startsWith('{"type":"session",')) headers++;
+		return realParse(text, reviver);
+	}) as typeof JSON.parse;
+	try {
+		fn();
+	} finally {
+		JSON.parse = realParse;
+	}
+	return headers;
+}
+
+describe("index connection reuse", () => {
+	function countSetups(fn: () => void): number {
+		const realExec = DatabaseSync.prototype.exec;
+		let setups = 0;
+		DatabaseSync.prototype.exec = function (sql: string) {
+			if (sql === "PRAGMA journal_mode = WAL") setups++;
+			return realExec.call(this, sql);
+		};
+		try {
+			fn();
+		} finally {
+			DatabaseSync.prototype.exec = realExec;
+		}
+		return setups;
+	}
+
+	it("runs connection setup once across sync, search, browse, and preparation calls", () => {
+		const setups = countSetups(() => {
+			seedDeploy();
+			assert.equal(searchIndex(dbPath, "deploy pipeline").hits.length, 1);
+			assert.equal(searchIndex(dbPath, "yml OR .y").hits.length, 1);
+			assert.equal(getSessionRows(dbPath, 10).length, 1);
+			assert.equal(getPreparationRows(dbPath, { limit: 10 }).length, 1);
+			assert.equal(syncSessions(sessionsDir, dbPath).filesProcessed, 0);
+		});
+		assert.equal(setups, 1);
+	});
+
+	it("repeats setup after close, after index deletion, and after an external schema change", () => {
+		seedDeploy();
+		const setups = countSetups(() => {
+			closeIndexDatabases();
+			assert.equal(searchIndex(dbPath, "deploy pipeline").hits.length, 1);
+
+			// A deleted index must not keep serving the unlinked file.
+			for (const suffix of ["", "-wal", "-shm"]) fs.rmSync(dbPath + suffix, { force: true });
+			assert.equal(searchIndex(dbPath, "deploy pipeline").hits.length, 0);
+			assert.equal(syncSessions(sessionsDir, dbPath).filesProcessed, 1);
+			assert.equal(searchIndex(dbPath, "deploy pipeline").hits.length, 1);
+		});
+		assert.equal(setups, 2);
+
+		const external = new DatabaseSync(dbPath);
+		try {
+			external.exec("CREATE TABLE unrelated_marker (x)");
+		} finally {
+			external.close();
+		}
+		assert.equal(countSetups(() => assert.equal(searchIndex(dbPath, "deploy pipeline").hits.length, 1)), 1);
+	});
+});
+
+describe("append-only indexing", () => {
+	const header = JSON.stringify({ type: "session", version: 3, id: "hdr", timestamp: "2026-01-01T00:00:00.000Z", cwd: "/repo/first" });
+
+	function writeLines(file: string, lines: string[], trailingNewline = true): void {
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, lines.join("\n") + (trailingNewline ? "\n" : ""));
+	}
+
+	it("indexes only appended lines and matches a full rebuild, including metadata and duplicate ids", () => {
+		const file = path.join(sessionsDir, "--append--", "a.jsonl");
+		writeLines(file, [
+			header,
+			JSON.stringify({ type: "model_change", id: "dup-model", parentId: "hdr", provider: "x", modelId: "y" }),
+			msg("a1", "assistant", "appendfirst assistant reply"),
+		]);
+		assert.equal(syncSessions(sessionsDir, dbPath).filesProcessed, 1);
+		const before = indexedFile(dbPath, file);
+		assert.equal(before.session?.preview, null);
+		assert.equal(before.appendState, 1);
+
+		fs.appendFileSync(file, [
+			JSON.stringify({ type: "session_info", id: "info1", name: "Renamed session" }),
+			JSON.stringify({ type: "session", version: 3, id: "hdr2", timestamp: "2026-02-01T00:00:00.000Z", cwd: "/repo/second", parentSession: "/p.jsonl" }),
+			msg("dup-model", "user", "appenddropped reuses a model_change id"),
+			msg("a1", "user", "appenddropped reuses a message id"),
+			msg("u1", "user", "appendzebra first user prompt"),
+			msg("a2", "assistant", "appendzebra second reply"),
+		].join("\n") + "\n");
+
+		let synced = 0;
+		const headerParses = countHeaderParses(() => {
+			synced = syncSessions(sessionsDir, dbPath).filesProcessed;
+		});
+		assert.equal(synced, 1);
+		assert.equal(headerParses, 1, "append sync parses the appended header line only, not the prefix header");
+
+		const after = indexedFile(dbPath, file);
+		const rebuilt = rebuiltFile(file);
+		assert.deepEqual(after.session, rebuilt.session);
+		assert.deepEqual(after.messages, rebuilt.messages);
+		assert.deepEqual(after.session, {
+			cwd: "/repo/second",
+			name: "Renamed session",
+			started_at: "2026-02-01T00:00:00.000Z",
+			preview: "appendzebra first user prompt",
+			parent_session: "/p.jsonl",
+		});
+		assert.deepEqual(after.rowids.slice(0, before.rowids.length), before.rowids, "existing rows stay in place");
+		assert.equal(after.messages.length, 3);
+		assert.equal(searchIndex(dbPath, "appendzebra").hits.length, 1);
+		assert.equal(searchIndex(dbPath, "appenddropped").hits.length, 0);
+		assertFtsIntegrity(dbPath);
+	});
+
+	it("falls back to a full re-index after truncation or a rewrite of earlier bytes", () => {
+		const file = path.join(sessionsDir, "--append-rewrite--", "r.jsonl");
+		const lines = [header, msg("u1", "user", "rewriteoriginal first prompt"), msg("a1", "assistant", "rewritekept reply")];
+		writeLines(file, lines);
+		syncSessions(sessionsDir, dbPath);
+		const first = indexedFile(dbPath, file);
+
+		// Truncation: the file is shorter than the stored offset.
+		writeLines(file, lines.slice(0, 2));
+		assert.equal(countHeaderParses(() => assert.equal(syncSessions(sessionsDir, dbPath).filesProcessed, 1)), 1, "truncation parses the whole file");
+		assert.deepEqual(indexedFile(dbPath, file).messages, rebuiltFile(file).messages);
+		assert.equal(searchIndex(dbPath, "rewritekept").hits.length, 0);
+
+		// Rewrite in place that also grows: the prefix hash no longer matches.
+		writeLines(file, [header, msg("u1", "user", "rewritechanged first prompt"), msg("a1", "assistant", "rewritekept reply"), msg("a2", "assistant", "rewritegrown tail")]);
+		assert.equal(countHeaderParses(() => assert.equal(syncSessions(sessionsDir, dbPath).filesProcessed, 1)), 1, "a rewrite parses the whole file");
+		assert.deepEqual(indexedFile(dbPath, file).messages, rebuiltFile(file).messages);
+		assert.equal(searchIndex(dbPath, "rewriteoriginal").hits.length, 0);
+		assert.equal(searchIndex(dbPath, "rewritechanged").hits.length, 1);
+		assert.equal(first.messages.length, 2);
+		assertFtsIntegrity(dbPath);
+	});
+
+	it("falls back to a full re-index for a partial last line and for an index without append state", () => {
+		const file = path.join(sessionsDir, "--append-partial--", "p.jsonl");
+		writeLines(file, [header, msg("u1", "user", "partialbase prompt")]);
+		syncSessions(sessionsDir, dbPath);
+
+		// The complete JSON object has no newline yet. A full parse indexes it.
+		fs.appendFileSync(file, msg("a1", "assistant", "partialtail reply"));
+		assert.equal(syncSessions(sessionsDir, dbPath).filesProcessed, 1);
+		const partial = indexedFile(dbPath, file);
+		assert.deepEqual(partial.messages, rebuiltFile(file).messages);
+		assert.equal(partial.appendState, 0, "a snapshot without a final newline stores no append state");
+
+		fs.appendFileSync(file, "\n" + msg("a2", "assistant", "partialnext reply") + "\n");
+		assert.equal(countHeaderParses(() => assert.equal(syncSessions(sessionsDir, dbPath).filesProcessed, 1)), 1, "sync without append state parses the whole file");
+		const completed = indexedFile(dbPath, file);
+		assert.deepEqual(completed.messages, rebuiltFile(file).messages);
+		assert.equal(completed.appendState, 1);
+
+		// An index from an older version has no append state rows.
+		const external = new DatabaseSync(dbPath);
+		try {
+			external.exec("DELETE FROM session_append_state");
+		} finally {
+			external.close();
+		}
+		fs.appendFileSync(file, msg("a3", "assistant", "partiallegacy reply") + "\n");
+		assert.equal(countHeaderParses(() => assert.equal(syncSessions(sessionsDir, dbPath).filesProcessed, 1)), 1, "a missing append state parses the whole file");
+		const legacy = indexedFile(dbPath, file);
+		assert.deepEqual(legacy.messages, rebuiltFile(file).messages);
+		assert.equal(legacy.appendState, 1);
+		assertFtsIntegrity(dbPath);
 	});
 });
 

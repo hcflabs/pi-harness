@@ -5,10 +5,11 @@
  */
 import { DatabaseSync } from "node:sqlite";
 import type { SQLOutputValue } from "node:sqlite";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { buildFtsQueryPlan, buildLikeQueryPlan, foldCase, nearLike } from "./query.ts";
-import { MAX_SESSION_FILE_BYTES, readTranscriptEntries } from "./transcript.ts";
+import { MAX_SESSION_FILE_BYTES, parseTranscriptLines, readBoundedSnapshotBytes } from "./transcript.ts";
 import type { PreparationSessionRow, SearchHit, SessionRow, SyncResult } from "./types.ts";
 export const DEFAULT_SYNC_CAP = 50;
 const MAX_TEXT_CHARS = 20000;
@@ -75,6 +76,21 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+-- Append state lets sync parse only the complete lines after byte_offset.
+-- A row is valid only while its fingerprint equals the session_files row.
+-- prefix_sha256 covers bytes [0, byte_offset), and byte_offset ends a line.
+-- entry_ids is the JSON array of valid ids that the prefix reserved.
+-- An index from an older version has no rows here. Sync then re-indexes a
+-- changed file in full and writes its first row.
+CREATE TABLE IF NOT EXISTS session_append_state (
+  path TEXT PRIMARY KEY,
+  size INTEGER NOT NULL,
+  mtime_ms INTEGER NOT NULL,
+  ctime_ms REAL NOT NULL,
+  byte_offset INTEGER NOT NULL,
+  prefix_sha256 TEXT NOT NULL,
+  entry_ids TEXT NOT NULL
+);
 `;
 
 /** Owner-only modes for the index directory and database files. The
@@ -89,7 +105,7 @@ const DB_DIR_MODE = 0o700;
  *  nodes instead of following them; fchmod tightens an existing permissive db.
  *  WAL/SHM sidecars inherit the main db mode from SQLite; legacy sidecars left
  *  behind by older builds are tightened here too. Always closes the fd. */
-function secureIndexNode(dbPath: string): void {
+function secureIndexNode(dbPath: string): { dev: number; ino: number } {
 	const posix = process.platform !== "win32";
 	const dir = path.dirname(dbPath);
 	fs.mkdirSync(dir, { recursive: true, mode: DB_DIR_MODE });
@@ -103,6 +119,7 @@ function secureIndexNode(dbPath: string): void {
 		}
 	}
 	let fd: number | undefined;
+	let identity: { dev: number; ino: number };
 	try {
 		fd = fs.openSync(
 			dbPath,
@@ -112,10 +129,11 @@ function secureIndexNode(dbPath: string): void {
 		const st = fs.fstatSync(fd);
 		if (!st.isFile()) throw new Error("index database path is not a regular file");
 		if (posix && (st.mode & 0o777) !== DB_FILE_MODE) fs.fchmodSync(fd, DB_FILE_MODE);
+		identity = { dev: st.dev, ino: st.ino };
 	} finally {
 		if (fd !== undefined) fs.closeSync(fd);
 	}
-	if (!posix) return;
+	if (!posix) return identity;
 	for (const suffix of ["-wal", "-shm"]) {
 		// Same descriptor no-follow safety as the db path: chmodSync(path) would
 		// follow a swapped-in sidecar symlink and retarget its referent's mode.
@@ -135,10 +153,101 @@ function secureIndexNode(dbPath: string): void {
 			if (fd !== undefined) fs.closeSync(fd);
 		}
 	}
+	return identity;
 }
 
+/** One open connection per index path. The connection keeps the file
+ *  identity and the schema version that its setup checked. */
+interface CachedDb {
+	db: DatabaseSync;
+	dev: number;
+	ino: number;
+	schemaVersion: number;
+}
+
+const openDbs = new Map<string, CachedDb>();
+
+function schemaVersion(db: DatabaseSync): number {
+	return Number((db.prepare("PRAGMA schema_version").get() as { schema_version: number }).schema_version);
+}
+
+function evictDb(dbPath: string, db?: DatabaseSync): void {
+	const cached = openDbs.get(dbPath);
+	if (!cached || (db !== undefined && cached.db !== db)) return;
+	openDbs.delete(dbPath);
+	try {
+		cached.db.close();
+	} catch {
+		// The connection is unusable. A later call opens a new connection.
+	}
+}
+
+/** Close the cached index connection for `dbPath`, or all cached connections
+ *  when `dbPath` is absent. A later index call opens a new connection. */
+export function closeIndexDatabases(dbPath?: string): void {
+	for (const key of dbPath === undefined ? [...openDbs.keys()] : [dbPath]) evictDb(key);
+}
+
+/** Return the cached connection for `dbPath`, or open and check a new one.
+ *  secureIndexNode runs on every call, so mode tightening and node checks
+ *  do not change. A deleted or replaced index file, or a schema change by
+ *  another connection, discards the cached connection and repeats setup. */
 function openDb(dbPath: string): DatabaseSync {
-	secureIndexNode(dbPath);
+	const cached = openDbs.get(dbPath);
+	if (cached) {
+		// Close a connection to a deleted or replaced file before
+		// secureIndexNode creates the new file at this path.
+		let st: fs.Stats | undefined;
+		try {
+			st = fs.lstatSync(dbPath);
+		} catch {
+			st = undefined;
+		}
+		if (!st || st.dev !== cached.dev || st.ino !== cached.ino) evictDb(dbPath);
+	}
+	let identity: { dev: number; ino: number };
+	try {
+		identity = secureIndexNode(dbPath);
+	} catch (err) {
+		evictDb(dbPath);
+		throw err;
+	}
+	const current = openDbs.get(dbPath);
+	if (current) {
+		let reusable = false;
+		if (current.dev === identity.dev && current.ino === identity.ino) {
+			try {
+				reusable = schemaVersion(current.db) === current.schemaVersion;
+			} catch {
+				reusable = false;
+			}
+		}
+		if (reusable) return current.db;
+		evictDb(dbPath);
+	}
+	const db = setUpDb(dbPath);
+	try {
+		openDbs.set(dbPath, { db, ...identity, schemaVersion: schemaVersion(db) });
+	} catch (err) {
+		db.close();
+		throw err;
+	}
+	return db;
+}
+
+/** Run `fn` with the cached connection. An error discards the connection, so
+ *  the next call starts from a new connection as before the cache existed. */
+function withDb<T>(dbPath: string, fn: (db: DatabaseSync) => T): T {
+	const db = openDb(dbPath);
+	try {
+		return fn(db);
+	} catch (err) {
+		evictDb(dbPath, db);
+		throw err;
+	}
+}
+
+function setUpDb(dbPath: string): DatabaseSync {
 	const db = new DatabaseSync(dbPath);
 	try {
 		db.exec("PRAGMA journal_mode = WAL");
@@ -167,6 +276,7 @@ function openDb(dbPath: string): DatabaseSync {
 		for (const [table, required] of [
 			["session_files", ["path", "size", "mtime_ms", "ctime_ms"]],
 			["session_failures", ["path", "size", "mtime_ms", "ctime_ms", "attempts"]],
+			["session_append_state", ["path", "size", "mtime_ms", "ctime_ms", "byte_offset", "prefix_sha256", "entry_ids"]],
 		] as const) {
 			const have = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as any[]).map((c) => c.name as string));
 			for (const col of required) {
@@ -260,18 +370,11 @@ function extractText(content: unknown): string {
 	return parts.join("\n").trim();
 }
 
-function parseSessionFile(filePath: string, maxBytes: number): ParsedFile {
-	const parsed: ParsedFile = {
-		cwd: null,
-		name: null,
-		startedAt: null,
-		parentSession: null,
-		preview: null,
-		messages: [],
-	};
-	// Unreadable/oversized file must throw so the sync transaction rolls back
-	// instead of wiping previously indexed rows and advancing the watermark over a hole.
-	for (const { data: entryRaw, id } of readTranscriptEntries(filePath, maxBytes)) {
+/** Apply the entries of decoded snapshot text to `parsed`. Metadata in
+ *  `parsed` and ids in `seenIds` hold the state after the earlier lines, so
+ *  a parse that continues after a line boundary gives the full-parse result. */
+function parseSessionText(parsed: ParsedFile, content: string, seenIds: Set<string>): ParsedFile {
+	for (const { data: entryRaw, id } of parseTranscriptLines(content, seenIds)) {
 		const entry = entryRaw !== null && typeof entryRaw === "object" ? (entryRaw as Record<string, unknown>) : undefined;
 		switch (entry?.type) {
 			case "session":
@@ -308,6 +411,71 @@ function parseSessionFile(filePath: string, maxBytes: number): ParsedFile {
 		}
 	}
 	return parsed;
+}
+
+function emptyParsedFile(): ParsedFile {
+	return { cwd: null, name: null, startedAt: null, parentSession: null, preview: null, messages: [] };
+}
+
+/** Append state above this JSON size is not stored. The next change of
+ *  that file then uses a full re-index. */
+const MAX_APPEND_ID_CHARS = 1024 * 1024;
+const LF = 0x0a;
+
+function sha256(bytes: Uint8Array): string {
+	return createHash("sha256").update(bytes).digest("base64");
+}
+
+interface AppendStateRow {
+	byte_offset: number;
+	prefix_sha256: string;
+	entry_ids: string;
+	cwd: string | null;
+	name: string | null;
+	started_at: string | null;
+	preview: string | null;
+	parent_session: string | null;
+}
+
+/** Parse only the complete lines after the stored offset. Return null when
+ *  the result can differ from a full parse:
+ *  - no append state matches the current watermark,
+ *  - the file is shorter than the offset (truncation),
+ *  - the bytes before the offset changed (rewrite),
+ *  - the snapshot ends in a partial line.
+ *  A UTF-8 decoder restarts cleanly after a LF byte, so decoding only the
+ *  appended bytes gives the same lines as decoding the whole snapshot. */
+function parseAppendedLines(
+	state: AppendStateRow | undefined,
+	snapshot: Buffer,
+): { parsed: ParsedFile; seenIds: Set<string>; snapshotSha256: string } | null {
+	if (!state) return null;
+	const offset = Number(state.byte_offset);
+	if (!Number.isSafeInteger(offset) || offset < 0 || snapshot.length < offset) return null;
+	if (snapshot.length > offset && snapshot[snapshot.length - 1] !== LF) return null;
+	const hash = createHash("sha256").update(snapshot.subarray(0, offset));
+	if (hash.copy().digest("base64") !== state.prefix_sha256) return null;
+	let ids: unknown;
+	try {
+		ids = JSON.parse(state.entry_ids);
+	} catch {
+		return null;
+	}
+	if (!Array.isArray(ids) || !ids.every((id) => typeof id === "string")) return null;
+	const seenIds = new Set<string>(ids);
+	const parsed: ParsedFile = {
+		cwd: state.cwd,
+		name: state.name,
+		startedAt: state.started_at,
+		parentSession: state.parent_session,
+		preview: state.preview,
+		messages: [],
+	};
+	return {
+		parsed: parseSessionText(parsed, snapshot.toString("utf-8", offset), seenIds),
+		seenIds,
+		snapshotSha256: hash.update(snapshot.subarray(offset)).digest("base64"),
+	};
 }
 
 /** Walk result. `complete: false` means the tree could not be fully read
@@ -358,8 +526,7 @@ export function syncSessions(
 	opts?: { cap?: number; maxFileBytes?: number },
 ): SyncResult {
 	const cap = opts?.cap ?? DEFAULT_SYNC_CAP;
-	const db = openDb(dbPath);
-	try {
+	return withDb(dbPath, (db) => {
 
 	// Junk dirs never reach the walk result: pruned during descent.
 	const walk = walkJsonlFiles(sessionsDir);
@@ -426,21 +593,50 @@ export function syncSessions(
 	const insertMsg = db.prepare(
 		"INSERT INTO messages(path, entry_id, role, timestamp, head, tail) VALUES (?, ?, ?, ?, ?, ?)",
 	);
+	// The join accepts append state only when it belongs to the current
+	// watermark. A writer that does not know this table (an older version)
+	// changes the watermark, so sync then re-indexes the file in full.
+	const getAppendState = db.prepare(
+		`SELECT a.byte_offset, a.prefix_sha256, a.entry_ids, s.cwd, s.name, s.started_at, s.preview, s.parent_session
+		 FROM session_append_state a
+		 JOIN session_files f ON f.path = a.path AND f.size = a.size AND f.mtime_ms = a.mtime_ms AND f.ctime_ms = a.ctime_ms
+		 JOIN sessions s ON s.path = a.path
+		 WHERE a.path = ?`,
+	);
+	const upsertAppendState = db.prepare(
+		`INSERT INTO session_append_state(path, size, mtime_ms, ctime_ms, byte_offset, prefix_sha256, entry_ids) VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(path) DO UPDATE SET size=excluded.size, mtime_ms=excluded.mtime_ms, ctime_ms=excluded.ctime_ms,
+		 byte_offset=excluded.byte_offset, prefix_sha256=excluded.prefix_sha256, entry_ids=excluded.entry_ids`,
+	);
+	const delAppendState = db.prepare("DELETE FROM session_append_state WHERE path = ?");
 
 	const maxFileBytes = opts?.maxFileBytes ?? MAX_SESSION_FILE_BYTES;
 
 	const tx = (filePath: string, stat: fs.Stats): void => {
 		db.exec("BEGIN");
 		try {
-			const parsed = parseSessionFile(filePath, maxFileBytes);
-			delStmt.run(filePath);
+			// Unreadable/oversized file must throw so the sync transaction rolls back
+			// instead of wiping previously indexed rows and advancing the watermark over a hole.
+			const snapshot = readBoundedSnapshotBytes(filePath, maxFileBytes);
+			const appended = parseAppendedLines(getAppendState.get(filePath) as AppendStateRow | undefined, snapshot);
+			const seenIds = appended?.seenIds ?? new Set<string>();
+			const parsed = appended?.parsed ?? parseSessionText(emptyParsedFile(), snapshot.toString("utf-8"), seenIds);
+			// Indexed rows of an appended file are the full-parse rows of its
+			// unchanged prefix, so only the new messages are inserted.
+			if (!appended) delStmt.run(filePath);
 			upsertSession.run(filePath, parsed.cwd, parsed.name, parsed.startedAt, parsed.preview, parsed.parentSession);
 			for (const msg of parsed.messages) {
 				insertMsg.run(filePath, msg.entryId, msg.role, msg.timestamp, msg.head, msg.tail);
 			}
-			{
-				const fp = fileFingerprint(stat);
-				upsertFile.run(filePath, fp.size, fp.mtimeMs, fp.ctimeMs);
+			const fp = fileFingerprint(stat);
+			upsertFile.run(filePath, fp.size, fp.mtimeMs, fp.ctimeMs);
+			// A partial last line can parse differently after more bytes arrive,
+			// so only a snapshot that ends a line gets append state.
+			const entryIds = JSON.stringify([...seenIds]);
+			if ((snapshot.length === 0 || snapshot[snapshot.length - 1] === LF) && entryIds.length <= MAX_APPEND_ID_CHARS) {
+				upsertAppendState.run(filePath, fp.size, fp.mtimeMs, fp.ctimeMs, snapshot.length, appended?.snapshotSha256 ?? sha256(snapshot), entryIds);
+			} else {
+				delAppendState.run(filePath);
 			}
 			delFailure.run(filePath);
 			db.exec("COMMIT");
@@ -474,6 +670,7 @@ export function syncSessions(
 		delSession.run(p);
 		delFile.run(p);
 		delFailure.run(p);
+		delAppendState.run(p);
 	}
 	for (const p of deletedFailures) delFailure.run(p);
 
@@ -482,9 +679,7 @@ export function syncSessions(
 	db.prepare("INSERT INTO meta(key, value) VALUES ('backlog', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(String(backlog));
 
 	return { filesProcessed, backlogRemaining: backlog, walkComplete: walk.complete };
-	} finally {
-		db.close();
-	}
+	});
 }
 
 function getBacklog(db: DatabaseSync): number {
@@ -556,8 +751,7 @@ export function searchIndex(
 	opts?: SearchOptions,
 ): { hits: SearchHit[]; backlogRemaining: number } {
 	const limit = opts?.limit ?? 3;
-	const db = openDb(dbPath);
-	try {
+	return withDb(dbPath, (db) => {
 		const currentSessionPath = opts?.currentSessionPath ?? null;
 		const plan = buildFtsQueryPlan(query);
 		if (plan.ftsCandidates.length === 0 && !plan.forceLike) {
@@ -635,9 +829,7 @@ export function searchIndex(
 			startedAt: r.started_at ?? undefined,
 		}));
 		return { hits, backlogRemaining: getBacklog(db) };
-	} finally {
-		db.close();
-	}
+	});
 }
 
 // --- Preparation / browse ---
@@ -670,8 +862,7 @@ export function getPreparationRows(
 		params.push(opts.currentSessionPath);
 	}
 	const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
-	const db = openDb(dbPath);
-	try {
+	return withDb(dbPath, (db) => {
 		const rows = db.prepare(`
 			WITH eligible AS (
 				SELECT s.path, s.cwd, s.name, s.started_at, s.preview,
@@ -706,19 +897,14 @@ export function getPreparationRows(
 			preview: r.preview ?? undefined,
 			lineageId: r.lineage_id,
 		}));
-	} finally {
-		db.close();
-	}
+	});
 }
 
 export function getSessionRows(dbPath: string, limit: number): SessionRow[] {
-	const db = openDb(dbPath);
-	try {
+	return withDb(dbPath, (db) => {
 		const rows = db
 			.prepare("SELECT path, cwd, name, started_at, preview FROM sessions ORDER BY started_at DESC LIMIT ?")
 			.all(limit) as any[];
 		return rows.map((r) => ({ path: r.path, cwd: r.cwd ?? "", name: r.name ?? undefined, startedAt: r.started_at ?? undefined, preview: r.preview ?? undefined }));
-	} finally {
-		db.close();
-	}
+	});
 }
