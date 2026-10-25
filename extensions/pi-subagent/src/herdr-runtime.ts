@@ -1037,6 +1037,7 @@ export class HerdrHostRuntime implements HostRuntime {
 				args: [...args, "--session", sessionFile],
 				options,
 				shouldRetry: () => false,
+				freshPane: true,
 			});
 			if (response.code !== 0 || response.killed) {
 				const failure = safeText(herdrCommandFailure(["agent", "start"], response));

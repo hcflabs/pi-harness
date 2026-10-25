@@ -1,6 +1,6 @@
 {
   "name": "@hcflabs/pi-subagent",
-  "version": "28.3.1",
+  "version": "28.3.2",
   "description": "Delegate bounded direct work or durable checked isolated task graphs to Pi roles.",
   "keywords": [
     "pi-package",
@@ -71,7 +71,7 @@
   },
   "dependencies": {
     "@hcflabs/pi-config-store": "^4.0.0",
-    "@hcflabs/pi-herdr": "^0.6.0",
+    "@hcflabs/pi-herdr": "^0.7.0",
     "@hcflabs/pi-process": "^0.3.0",
     "@hcflabs/pi-repo": "^0.1.0",
     "@hcflabs/pi-task-models": "^9.0.0",

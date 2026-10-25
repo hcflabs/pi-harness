@@ -26,6 +26,7 @@ const AGENT_START_RETRY_DELAY_MS = 250;
 const SHELL_PROMPT_TIMEOUT_MS = 20_000;
 const SHELL_PROMPT_POLL_MS = 100;
 const PANE_READ_LINES = "40";
+const SHELL_FOREGROUND_MAX_POLLS = SHELL_PROMPT_TIMEOUT_MS / SHELL_PROMPT_POLL_MS;
 
 /**
  * Whether `pane process-info` shows the pane shell still owning the foreground process group. Startup
@@ -58,6 +59,10 @@ function shellPromptFollows(screen: string, token: string): boolean {
  * prompt is drawn only when the shell is about to read, so the probe waits for the token output and
  * a non-blank line after it. An occupied pane is left untouched so `agent start` reports
  * `agent_pane_busy` itself. Returns the failed Herdr result, or undefined when ready.
+ *
+ * Set `freshPane` when the caller created the pane for this launch. With job control on, shell
+ * startup files (for example Oh My Zsh) run commands in their own foreground process groups. The
+ * function then polls until the shell owns the foreground, for at most the prompt timeout.
  */
 export async function awaitShellPrompt<Options>(
 	client: Pick<HerdrClient<Options>, "exec">,
@@ -65,12 +70,17 @@ export async function awaitShellPrompt<Options>(
 	options: Options,
 	wait: (milliseconds: number) => Promise<void> = delay,
 	requireShell = false,
+	freshPane = false,
 ): Promise<HerdrExecResult | undefined> {
-	const info = await client.exec(["pane", "process-info", "--pane", pane], options);
-	if (info.code !== 0 || info.killed) return info;
-	if (!shellOwnsForeground(info.stdout)) {
-		// `pane run` types into any foreground program. A caller that types a command requires the shell itself.
-		return requireShell ? { code: 1, stdout: "", stderr: `pane ${pane} runs a foreground program, not its shell` } : undefined;
+	for (let poll = 1; ; poll += 1) {
+		const info = await client.exec(["pane", "process-info", "--pane", pane], options);
+		if (info.code !== 0 || info.killed) return info;
+		if (shellOwnsForeground(info.stdout)) break;
+		if (!freshPane || poll >= SHELL_FOREGROUND_MAX_POLLS) {
+			// `pane run` types into any foreground program. A caller that types a command requires the shell itself.
+			return requireShell ? { code: 1, stdout: "", stderr: `pane ${pane} runs a foreground program, not its shell` } : undefined;
+		}
+		await wait(SHELL_PROMPT_POLL_MS);
 	}
 	const token = `pi-herdr-ready-${Math.random().toString(16).slice(2, 18).padEnd(16, "0")}`;
 	const ran = await client.exec(["pane", "run", pane, `echo ${token}`], options);
@@ -98,6 +108,8 @@ export interface StartPiAgentOptions<Options> {
 	delay?: (milliseconds: number) => Promise<void>;
 	onPaneBusy?: () => Promise<string>;
 	shouldRetry?: (result: HerdrExecResult) => boolean;
+	/** The caller created the pane for this launch, so its shell can still run startup files. */
+	freshPane?: boolean;
 }
 
 /** Start a Pi agent in a Herdr pane once its shell is reading input, retrying only transient pane contention. */
@@ -114,7 +126,7 @@ export async function startPiAgent<Options>(
 	let onPaneBusy = input.onPaneBusy;
 	let result: HerdrExecResult | undefined;
 	for (let attempt = 1; attempt <= MAX_AGENT_START_ATTEMPTS; attempt += 1) {
-		result = await awaitShellPrompt(client, pane, input.options, input.delay ?? delay)
+		result = await awaitShellPrompt(client, pane, input.options, input.delay ?? delay, false, input.freshPane === true)
 			?? await client.exec(["agent", "start", name, "--kind", "pi", "--pane", pane, "--", ...piArgs], input.options);
 		if (result.code === 0 && !result.killed) return result;
 		if (
