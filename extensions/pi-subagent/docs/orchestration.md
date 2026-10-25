@@ -200,7 +200,7 @@ Main · 2 working · 1 complete
 └─ ✓ D8.1 [R] complete · Review patch · …
 ```
 
-In Pi fullscreen mode, click a working worker row to focus its Herdr pane. Before the extension moves focus, Herdr must confirm that the pane still runs the exact launched agent. If the check fails, Pi shows a warning and focus does not change. The header, group rows, finished rows, the overflow row, and rows with a truncated reference do nothing when you click them. Regular mode leaves the mouse to the terminal. Use the Herdr tab label or `/subagent` to find a worker from the keyboard. A click moves focus only. It gives no ownership or control authority.
+In Pi fullscreen mode, click a worker row to focus its Herdr pane. This applies to working and finished workers, because a finished worker keeps its Herdr tab. A finished row stays in the widget until your next input. Before the extension moves focus, Herdr must confirm that the pane still runs the exact launched agent. If the check fails, for example because the tab was closed, Pi shows a warning and focus does not change. The header, group rows, the overflow row, and rows with a truncated reference do nothing when you click them. Regular mode leaves the mouse to the terminal. Use the Herdr tab label or `/subagent` to find a worker from the keyboard. A click moves focus only. It gives no ownership or control authority.
 
 The isolated widget shows the recorded task state and any retained workspace. It does not show reliable live model, thinking, or token readings from Herdr. Attention shows before ordinary work, and overflow uses `+N more · /subagent`. An aborted request with visible tasks has its own `request aborted` row. This row does not change the recorded statuses of the tasks.
 

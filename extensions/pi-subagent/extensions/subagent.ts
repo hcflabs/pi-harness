@@ -117,14 +117,15 @@ function statusCounts(items: readonly WidgetItem[]): string {
 	return STATUS_COUNT_ORDER.flatMap((status) => counts[status] ? [`${counts[status]} ${statusLabel(status)}`] : []).join(" · ");
 }
 
-/** One rendered widget line. `focus` names a live worker item that a click may focus. */
+/** One rendered widget line. `focus` names a worker item that a click may focus. */
 type WidgetRow = { text: string; focus?: string };
 type TreeLine = { top: number; child?: { last: boolean }; item?: [string, WidgetItem]; group?: WidgetItem[] };
 
 /**
  * Render the direct widget as a tree under a Main header.
  * A workflow with one launched worker is a leaf row. A workflow with more workers gets a group row.
- * `focusable` tells which item IDs have a live handle. Only fully visible references become click targets.
+ * `focusable` tells which item IDs have a launched handle. Working and finished worker rows are click targets.
+ * Only fully visible references become click targets.
  */
 function renderWidgetRows(
 	items: ReadonlyArray<[string, WidgetItem]>,
@@ -168,7 +169,7 @@ function renderWidgetRows(
 		const text = truncateToWidth(`${branch}${renderWorkerRow(item, room, now, spinnerIndex, theme)}`, width);
 		// The glyph, a space, and the full reference must be visible before a click can name this worker.
 		const referenceVisible = visibleWidth(connector) + 2 + visibleWidth(item.ref) <= width;
-		rows.push({ text, ...(item.status === "working" && referenceVisible && focusable(id) ? { focus: id } : {}) });
+		rows.push({ text, ...(referenceVisible && focusable(id) ? { focus: id } : {}) });
 	}
 	if (hidden.length) rows.push({ text: truncateToWidth(`${theme.fg("dim", "└─ ")}${theme.fg("muted", `… ${hidden.length} more · ${statusCounts(hidden)}`)}`, width) });
 	return rows;
@@ -242,6 +243,8 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	});
 	const widgetItems = new Map<string, WidgetItem>();
 	const tokenHandles = new Map<string, DirectHandle>();
+	// A finished worker keeps its Herdr tab. Its row keeps a focus handle until the row leaves the widget.
+	const focusHandles = new Map<string, Pick<DirectHandle, "focus">>();
 	const samplingTokens = new Set<string>();
 	const configStore = createSubagentConfigStore();
 	const configReporter = registerConfigReporting(pi, [configStore]);
@@ -520,9 +523,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	let focusInFlight = false;
 	// A click is a request only. The handle checks the exact Herdr agent identity before it moves focus.
 	const focusWorker = (id: string) => {
-		const handle = tokenHandles.get(id);
+		const handle = focusHandles.get(id);
 		const item = widgetItems.get(id);
-		if (!handle || item?.status !== "working" || focusInFlight) return;
+		if (!handle || !item || focusInFlight) return;
 		const epoch = sessionEpoch;
 		const ctx = latestCtx;
 		focusInFlight = true;
@@ -543,7 +546,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			return {
 				invalidate() {},
 				render(width) {
-					const rows = renderWidgetRows([...widgetItems], width, Date.now(), spinnerIndex, theme, (id) => tokenHandles.has(id));
+					const rows = renderWidgetRows([...widgetItems], width, Date.now(), spinnerIndex, theme, (id) => focusHandles.has(id));
 					renderedWidth = width;
 					hits = rows.flatMap(({ text, focus }, row) => focus ? [{ row, to: visibleWidth(text), id: focus }] : []);
 					return rows.map(({ text }) => text);
@@ -574,6 +577,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			for (const [oldestId, item] of widgetItems) {
 				if (item.status === "working" || item.taskId === taskId) continue;
 				widgetItems.delete(oldestId);
+				focusHandles.delete(oldestId);
 				if (widgetItems.size < MAX_WIDGET_ITEMS) break;
 			}
 		}
@@ -659,6 +663,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		stopWidgetTimer();
 		widgetItems.clear();
 		tokenHandles.clear();
+		focusHandles.clear();
 		samplingTokens.clear();
 		activeTui = undefined;
 		widgetInstalled = false;
@@ -679,7 +684,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	pi.on("input", (event) => {
 		if (event.source === "extension") return;
 		for (const [id, item] of widgetItems) {
-			if (item.status !== "working") widgetItems.delete(id);
+			if (item.status !== "working") { widgetItems.delete(id); focusHandles.delete(id); }
 		}
 		requestWidgetRender();
 	});
@@ -981,7 +986,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				await transient.cleanup();
 				handles.push(handle);
 				handleByEntry.set(entry.id, handle);
-				if (widgetItems.has(entry.id)) tokenHandles.set(entry.id, handle);
+				if (widgetItems.has(entry.id)) { tokenHandles.set(entry.id, handle); focusHandles.set(entry.id, handle); }
 				return handle;
 			};
 			// The first tab is verified before returning a handle; subsequent independent
