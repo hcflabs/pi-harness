@@ -18,7 +18,6 @@ Each context defines package-specific language and its boundary. Contexts are ad
 | `pi-herdr` | [Pi Herdr](packages/pi-herdr/CONTEXT.md) | Herdr panes, Pi-agent launches, and shell readiness |
 | `pi-herdr-tools` | [Pi Herdr Tools](extensions/pi-herdr-tools/CONTEXT.md) | Conversation clones, handoffs, side questions, titles, and worktree completion |
 | `pi-memory` | [Pi Memory](extensions/pi-memory/CONTEXT.md) | Durable cross-session facts, candidate review, and approved rule promotion |
-| `pi-multi-codex` | [Pi Multi Codex](extensions/pi-multi-codex/CONTEXT.md) | Codex account slots, quota ranking, and failover |
 | `pi-notes` | [Pi Notes](extensions/pi-notes/CONTEXT.md) | User reminders owned by one Git worktree instance |
 | `pi-prompt-creator` | [Pi Prompt Creator](extensions/pi-prompt-creator/CONTEXT.md) | Conversation signals, prompt candidates, review, and approved prompt creation |
 | `pi-repo` | [Pi Repo](packages/pi-repo/CONTEXT.md) | Repository targets, selectors, and bounded child repository discovery |
@@ -39,7 +38,7 @@ Arrows mean that the first context uses a capability owned by the second, unless
 | `pi-prompt-creator` → `pi-subagent` | Prompt analysis uses the bounded executor for a tool-free child, not a Role changeset; see [prompt analysis](extensions/pi-prompt-creator/README.md#analysis). |
 | `pi-herdr-tools`, `pi-subagent` → `pi-herdr` | The shared package supplies Herdr access. Consumers retain conversation and worker workflow ownership; see [ADR 002](docs/adr/002-shared-herdr-cli-client.md). |
 | `pi-memory` → `pi-ask-question` | Memory conflict resolution uses the shared question UI; see [candidate review](extensions/pi-memory/README.md#candidate-review). |
-| `pi-footer` ← `pi-multi-codex`, `pi-codegraph`, `pi-subagent` | The footer displays quota and index status and counts completed subagent usage. It does not own those workflows; see [footer display](extensions/pi-footer/README.md#use). |
+| `pi-footer` ← `pi-codegraph`, `pi-subagent` | The footer displays index status and counts completed subagent usage. It does not own those workflows; see [footer display](extensions/pi-footer/README.md#use). |
 | `pi-memory` ← `pi-herdr-tools` | Memory recognizes side-thread children to omit parent-only injection; see the [Memory](extensions/pi-memory/README.md#works-with) guidance. |
 | `pi-goal`, `pi-auto-compact` | Both handle Pi's final-settlement boundary. Each keeps earlier boundary entries; Pi Goal yields when another handler already continues. See [Pi Goal flow](extensions/pi-goal/README.md#flow). |
 | `pi-advisor` ← `pi-goal`, `pi-auto-compact` | Pi Advisor reviews a Run only after Pi settles it, so boundary continuations by these extensions stay in the reviewed Run. It starts at most one follow-up Run for each user prompt. See [Pi Advisor flow](extensions/pi-advisor/README.md#flow). |

@@ -18,7 +18,6 @@ pi install npm:@hcflabs/pi-task-models
 | [`@hcflabs/pi-auto-compact`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-auto-compact) | Consumer | Compaction defaults to `fast`. |
 | [`@hcflabs/pi-herdr-tools`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-herdr-tools) | Consumer | Side-thread and rename tasks default to `fast`. |
 | [`@hcflabs/pi-memory`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-memory) | Consumer | Candidate review, `/remember` preparation, and `/dream` promotion default to `balanced`. |
-| [`@hcflabs/pi-multi-codex`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-multi-codex) | Improves | Numbered Codex slots become one route. |
 | [`@hcflabs/pi-prompt-creator`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-prompt-creator) | Consumer | Prompt drafting defaults to `fast`. |
 | [`@hcflabs/pi-subagent`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-subagent) | Consumer | Delegation defaults to `fast`. Callers can declare their own task. |
 

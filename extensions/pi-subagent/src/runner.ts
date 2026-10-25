@@ -247,6 +247,15 @@ export interface HostRuntime {
 	}, context: OperationContext): Promise<
 		{ outcome: "terminated" | "active" } | { outcome: "unknown"; failure: string }
 	>;
+	/**
+	 * Optional. Proves that the exact owned worker is settled with a `stop` Final turn on its latest recorded prompt.
+	 * Without this method, `verify` cannot adopt a later candidate.
+	 */
+	inspectSettledWorker?(input: {
+		task: TaskRequest;
+		attempt: TaskAttempt;
+		workerId: string;
+	}, context: OperationContext): Promise<{ outcome: "settled" } | { outcome: "active" | "unknown"; failure: string }>;
 	cleanupHost(input: {
 		requestId: ExecuteRequest["id"];
 		kind: HostCleanupKind;
@@ -727,6 +736,23 @@ function correctionEligible(request: ChangesetTaskRequest, attempt: TaskAttempt)
 				&& sameIdentity(attempt.preliminaryReview.base, attempt.candidateBase!)
 				&& sameIdentity(attempt.preliminaryReview.tip, attempt.candidate)
 				&& sameIdentity(attempt.preliminaryReview.identityAfter, attempt.candidate)));
+}
+
+/**
+ * True when `verify` can adopt a later candidate of the same settled worker.
+ * The latest prompt settled without a candidate, and no candidate exists in the prompt lineage.
+ * The worker can still leave a candidate after a false finished reading.
+ */
+function lateAdoptionEligible(task: ChangesetTaskState, attempt: TaskAttempt): boolean {
+	const last = attempt.prompts.at(-1);
+	return task.status === "needs_attention"
+		&& !attempt.superseded
+		&& !attempt.candidate && !attempt.candidateBase
+		&& last?.status === "settled" && !last.candidate
+		&& !attempt.prompts.some((prompt) => prompt.status === "ambiguous" || prompt.status === "submitting")
+		&& !attempt.termination && !attempt.readiness && !attempt.preliminaryChecks && !attempt.preliminaryReview
+		&& Boolean(allocationByKind(attempt, "agent")?.agentName && allocationByKind(attempt, "worktree")?.worktree)
+		&& last.preCandidate.head === attempt.waveBase.head;
 }
 
 function terminal(state: RunState): boolean {
@@ -3213,6 +3239,81 @@ export class IsolatedRunner {
 			- state.tasks.findIndex((item) => item.taskId === b.taskId));
 	}
 
+	private lateAdoptionAvailable(state: RunState, task: ChangesetTaskState, attempt: TaskAttempt): boolean {
+		return Boolean(this.hostRuntime.inspectSettledWorker) && !state.integration.candidates.length
+			&& lateAdoptionEligible(task, attempt);
+	}
+
+	/**
+	 * Adopts the later clean committed candidate of the same settled worker. It sends no prompt and uses no correction.
+	 * A refusal before the candidate is saved throws and changes no state.
+	 * Returns a response when the adopted candidate needs attention. Returns undefined when readiness can continue.
+	 */
+	private async adoptLateCandidate(
+		handle: RunStateHandle,
+		task: ChangesetTaskState,
+		attempt: TaskAttempt,
+		scope: RuntimeScope,
+	): Promise<RunResponse | undefined> {
+		const state = handle.state;
+		const request = changesetTaskRequest(state, task.taskId);
+		const last = attempt.prompts.at(-1)!;
+		if (last.preCandidate.head !== attempt.waveBase.head) {
+			throw new Error("Late candidate adoption requires a prompt lineage that starts at the wave base.");
+		}
+		const workerId = allocationByKind(attempt, "agent")!.agentName!;
+		const branch = `refs/heads/${allocationByKind(attempt, "worktree")!.worktree!.branch}`;
+		const requireSettled = async (): Promise<void> => {
+			const result = await this.callProductive(handle, scope, async (context) => await this.hostRuntime.inspectSettledWorker!({
+				task: request, attempt, workerId,
+			}, context));
+			if (result.outcome !== "settled") {
+				throw new Error(`Late candidate adoption requires the exact worker to be settled with a stop Final turn on its latest prompt (${result.outcome}): ${boundedRuntimeText(result.failure, "Settled worker failure")}`);
+			}
+		};
+		await requireSettled();
+		const candidate = runtimeIdentity(await this.callProductive(handle, scope, async (context) => await this.gitRuntime.inspectRetainedTask({
+			root: state.root, task: request, attempt,
+		}, context)), "Late task candidate identity");
+		if (!isCleanCommitted(candidate) || candidate.branch !== branch || candidate.head === attempt.waveBase.head) {
+			throw new Error("Late candidate adoption requires a new clean committed candidate on the owned branch.");
+		}
+		// A second proof after the Git read shows that the worker stayed settled on the same latest prompt.
+		await requireSettled();
+		last.candidate = candidate;
+		attempt.candidate = candidate;
+		attempt.candidateBase = attempt.waveBase;
+		await this.saveProductive(handle);
+		try {
+			attempt.preliminaryChecks = await this.runCheckBatch(handle, request.checks, candidate, "preliminary", scope, task.taskId);
+			await this.saveProductive(handle);
+			if (!attempt.preliminaryChecks.passed) {
+				this.attention(task, sameIdentity(attempt.preliminaryChecks.identityAfter, candidate)
+					? "A declared task check failed on the adopted candidate."
+					: "A declared task check changed the adopted candidate.");
+				await this.saveProductive(handle);
+				return this.response(state);
+			}
+			if (request.judgment) {
+				attempt.preliminaryReview = await this.runReview(handle, request.judgment.criterion,
+					attempt.candidateBase, candidate, request.judgment.role,
+					request.judgment.modelClass, "preliminary", scope, task.taskId);
+				await this.saveProductive(handle);
+				if (!attempt.preliminaryReview.passed) {
+					this.attention(task, "Preliminary Judgment did not return exact PASS on the adopted candidate.");
+					await this.saveProductive(handle);
+					return this.response(state);
+				}
+			}
+		} catch (error) {
+			this.rethrowStopped(error);
+			this.attention(task, `Adopted candidate validation was interrupted: ${errorText(error)}`);
+			await this.saveProductive(handle);
+			throw error;
+		}
+		return undefined;
+	}
+
 	private async verifyRetainedTask(
 		handle: RunStateHandle,
 		task: ChangesetTaskState,
@@ -3221,6 +3322,10 @@ export class IsolatedRunner {
 		const attempt = latestAttempt(task);
 		if (attempt.prompts.some((prompt) => prompt.status === "ambiguous")) {
 			throw new Error("An ambiguous delivered prompt is retained for inspection or explicit abort and is never replayed.");
+		}
+		if (!attempt.candidate && this.lateAdoptionAvailable(handle.state, task, attempt)) {
+			const stopped = await this.adoptLateCandidate(handle, task, attempt, scope);
+			if (stopped) return stopped;
 		}
 		const candidate = runtimeIdentity(await this.callProductive(handle, scope, async (context) => await this.gitRuntime.inspectRetainedTask({
 			root: handle.state.root, task: changesetTaskRequest(handle.state, task.taskId), attempt,
@@ -3650,7 +3755,7 @@ export class IsolatedRunner {
 					continuation = { id: state.request.id, action: "verify", taskId: attention.taskId };
 				} else if (attempt && this.correctionAllowed(state, changesetTaskRequest(state, attention.taskId), attempt)) {
 					continuation = { id: state.request.id, action: "retry", taskId: attention.taskId };
-				} else if (hasEvidence) {
+				} else if (hasEvidence || (attempt && this.lateAdoptionAvailable(state, attention, attempt))) {
 					continuation = { id: state.request.id, action: "verify", taskId: attention.taskId };
 				}
 			}

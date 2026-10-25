@@ -50,7 +50,7 @@ import {
 import { runProcess as defaultRunProcess } from "./process.ts";
 import { EXECUTION_BUDGET_ENV, type EphemeralSubagentExecutionBudget } from "./ephemeral.ts";
 import { assertPrivateLease, PI_SUBAGENT_PROCESS_LEASE, scanProcessLease } from "./process-lease.ts";
-import { readPrivateSession, readSessionTurn, type SessionTurn } from "./session-turn.ts";
+import { readPrivateSession, readSessionTurn, type PromptMatch, type SessionTurn } from "./session-turn.ts";
 import { READABLE_BRANCH_PATTERN } from "./worktree.ts";
 
 const MIN_HERDR_VERSION = [0, 9, 3] as const;
@@ -64,6 +64,8 @@ const STALLED_PROMPT_POLL_MS = 250;
 const DEFAULT_SETTLED_IDLE_MS = 600_000;
 const HOST_LAYOUT_POLL_MS = 50;
 const HOST_LAYOUT_MAX_POLLS = 40;
+const SHELL_IDLE_POLL_MS = 100;
+const SHELL_IDLE_MAX_POLLS = 100;
 const DIAGNOSTIC_LIMIT = 8 * 1024;
 const LEASE_MODE = 0o600;
 const DIRECTORY_MODE = 0o700;
@@ -781,6 +783,40 @@ export class HerdrHostRuntime implements HostRuntime {
 		}
 	}
 
+	/**
+	 * Proves that the exact owned worker is settled with a `stop` Final turn on its latest recorded prompt.
+	 * The method reads the lifecycle and the session one time. It sends no prompt and closes nothing.
+	 */
+	async inspectSettledWorker(
+		input: { task: TaskRequest; attempt: TaskAttempt; workerId: string },
+		context: OperationContext,
+	): Promise<{ outcome: "settled" } | { outcome: "active" | "unknown"; failure: string }> {
+		try {
+			const allocation = ownedIntent(input.attempt, "agent");
+			requireIntentIdentity(allocation, input.attempt);
+			assertAgentIntent(allocation, input.attempt);
+			if (input.workerId !== allocation.agentName) throw new Error("Settled worker inspection does not target the exact saved agent.");
+			this.assertLeasePath(allocation.leasePath, allocation.token);
+			await assertPrivateLease(allocation.leasePath, false);
+			// runWorker adds the prompt count after it records the prompt. So the latest prompt has the identity of the count.
+			const index = input.attempt.prompts.length;
+			if (!index) throw new Error("Settled worker inspection requires a recorded worker prompt.");
+			const lifecycle = await this.waitForAgentLifecycle(allocation, context, true);
+			if (!SETTLED_AGENT_STATES.has(lifecycle.status)) {
+				return { outcome: "active", failure: `The exact worker is not settled: ${lifecycle.status}.` };
+			}
+			const suffix = `\n\nTurn identity: ${input.attempt.correlationToken}:${index}`;
+			const turn = await this.workerSessionTurn(allocation, (text) => text.endsWith(suffix), context.signal);
+			if (turn.state === "succeeded") return { outcome: "settled" };
+			if (turn.state === "failed") return { outcome: "unknown", failure: `The latest worker prompt has no stop Final turn. ${turn.failure}` };
+			return { outcome: "active", failure: turn.state === "running"
+				? "The latest worker prompt has no Final turn yet."
+				: "The worker session has no entry for the latest worker prompt." };
+		} catch (error) {
+			return { outcome: "unknown", failure: safeText(error) };
+		}
+	}
+
 	private async proveAbsentAgentForCleanup(
 		allocation: AgentAllocationIntent,
 		attempt: TaskAttempt,
@@ -982,7 +1018,7 @@ export class HerdrHostRuntime implements HostRuntime {
 		if ((await this.scanLease(allocation.leasePath, allocation.worktreeCwd, context)).length) {
 			throw new Error("Agent start requires an empty exact process lease.");
 		}
-		await this.assertStartableAgentPane(allocation, context, { requireExclusiveTty: false });
+		await this.assertStartableAgentPane(allocation, context, { requireExclusiveTty: false, awaitIdleShell: true });
 		const options = this.processOptions(allocation.worktreeCwd, context, HERDR_OPERATION_CAP_MS);
 		const handle = await acquireLaunch();
 		return await withTransientLaunch(handle, async (launch) => {
@@ -1192,7 +1228,7 @@ export class HerdrHostRuntime implements HostRuntime {
 	private async assertStartableAgentPane(
 		allocation: AgentAllocationIntent,
 		context: OperationContext,
-		options: { requireExclusiveTty: boolean },
+		options: { requireExclusiveTty: boolean; awaitIdleShell?: boolean },
 	): Promise<void> {
 		const paneResponse = await this.herdr.json(
 			["pane", "get", allocation.paneId],
@@ -1209,26 +1245,42 @@ export class HerdrHostRuntime implements HostRuntime {
 			throw new Error("The exact saved agent pane is not empty and startable in its owned worktree.");
 		}
 
-		const processResponse = await this.herdr.json(
-			["pane", "process-info", "--pane", allocation.paneId],
-			this.processOptions(allocation.worktreeCwd, context, HERDR_OPERATION_CAP_MS),
-		);
-		const processResult = resultRecord(processResponse, "Herdr agent pane process-info response");
-		if (processResult.type !== "pane_process_info") throw new Error("Herdr agent pane process-info response has the wrong type.");
-		const processInfo = record(processResult.process_info, "Herdr agent pane process-info");
-		const shellPid = processInfo.shell_pid;
-		const foreground = processInfo.foreground_processes;
-		if (exactString(processInfo.pane_id, "Herdr agent process pane ID") !== allocation.paneId
-			|| !Number.isSafeInteger(shellPid) || Number(shellPid) <= 0
-			|| processInfo.foreground_process_group_id !== shellPid
-			|| !Array.isArray(foreground) || foreground.length !== 1) {
-			throw new Error("The exact saved agent pane process state is not an idle foreground shell.");
+		let shellPid: unknown;
+		for (let poll = 0; ; poll += 1) {
+			const processResponse = await this.herdr.json(
+				["pane", "process-info", "--pane", allocation.paneId],
+				this.processOptions(allocation.worktreeCwd, context, HERDR_OPERATION_CAP_MS),
+			);
+			const processResult = resultRecord(processResponse, "Herdr agent pane process-info response");
+			if (processResult.type !== "pane_process_info") throw new Error("Herdr agent pane process-info response has the wrong type.");
+			const processInfo = record(processResult.process_info, "Herdr agent pane process-info");
+			if (exactString(processInfo.pane_id, "Herdr agent process pane ID") !== allocation.paneId) {
+				throw new Error("The exact saved agent pane process state is not an idle foreground shell.");
+			}
+			shellPid = processInfo.shell_pid;
+			const foreground = processInfo.foreground_processes;
+			const idleGroup = Number.isSafeInteger(shellPid) && Number(shellPid) > 0
+				&& processInfo.foreground_process_group_id === shellPid
+				&& Array.isArray(foreground) && foreground.length === 1;
+			const shell = idleGroup ? record(foreground[0], "Herdr agent pane foreground process") : undefined;
+			if (shell && shell.pid === shellPid && shell.cwd === allocation.worktreeCwd) {
+				exactString(shell.name, "Herdr agent pane shell name");
+				break;
+			}
+			if (!options.awaitIdleShell) {
+				if (!idleGroup) throw new Error("The exact saved agent pane process state is not an idle foreground shell.");
+				throw new Error("The exact saved agent pane foreground process is not its owned idle shell.");
+			}
+			if (poll + 1 >= SHELL_IDLE_MAX_POLLS) {
+				const processes = Array.isArray(foreground)
+					? foreground.slice(0, 20).map((process) => `${process?.pid}:${process?.name}`).join(", ")
+					: "malformed";
+				const diagnostic = safeText(`shell_pid=${shellPid}, foreground_process_group_id=${processInfo.foreground_process_group_id}, foreground=[${processes}]`);
+				throw new Error(`The exact saved agent pane process state is not an idle foreground shell. ${diagnostic}`);
+			}
+			// Only fresh allocation waits for shell startup. Recovery requires an immediate safety proof.
+			await this.delay(SHELL_IDLE_POLL_MS, context.signal);
 		}
-		const shell = record(foreground[0], "Herdr agent pane foreground process");
-		if (shell.pid !== shellPid || shell.cwd !== allocation.worktreeCwd) {
-			throw new Error("The exact saved agent pane foreground process is not its owned idle shell.");
-		}
-		exactString(shell.name, "Herdr agent pane shell name");
 		if (!options.requireExclusiveTty) return;
 
 		// Herdr's foreground list excludes background jobs, so recovery inventories every process on the shell's controlling TTY.
@@ -1332,7 +1384,7 @@ export class HerdrHostRuntime implements HostRuntime {
 		return `${leasePath}.session.jsonl`;
 	}
 
-	private async workerSessionTurn(allocation: AgentAllocationIntent, prompt: string, signal: AbortSignal): Promise<SessionTurn> {
+	private async workerSessionTurn(allocation: AgentAllocationIntent, prompt: PromptMatch, signal: AbortSignal): Promise<SessionTurn> {
 		const final = await readSessionTurn(this.workerSessionFile(allocation.leasePath, allocation.token), prompt, { signal });
 		// A symbolic link in the lease directories can redirect the session path, so evidence needs private directories.
 		if (final.state !== "absent") await this.assertPrivateLeaseDirectories(allocation.leasePath, false);

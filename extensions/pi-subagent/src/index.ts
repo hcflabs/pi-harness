@@ -64,8 +64,6 @@ export {
 	type PrepareExactReviewEvidenceInput,
 } from "./review-evidence.ts";
 
-const CODEX_ALIAS = /^openai-codex-(?:[2-9]|[1-9]\d+)$/;
-const MULTI_CODEX_EXTENSION = fileURLToPath(import.meta.resolve("@hcflabs/pi-multi-codex/extensions/multi-codex.ts"));
 const ROLE_MCP_EXTENSION = fileURLToPath(new URL("../extensions/role-mcp.ts", import.meta.url));
 const ROLE_TOOLS_EXTENSION = fileURLToPath(new URL("../extensions/role-tools.ts", import.meta.url));
 const GIT_READ_EXTENSION = fileURLToPath(new URL("../extensions/git-read.ts", import.meta.url));
@@ -688,7 +686,6 @@ function prepareRoleLaunchFromSkills(
 	}
 	const extensions = [
 		...selectedExtensions,
-		...(CODEX_ALIAS.test(input.route.model.provider) ? [MULTI_CODEX_EXTENSION] : []),
 		// Always loaded: it connects the servers that Role extensions register; `mcps` gates only mcp.json.
 		ROLE_MCP_EXTENSION,
 		...(role.tools.includes("git_read") ? [GIT_READ_EXTENSION] : []),
