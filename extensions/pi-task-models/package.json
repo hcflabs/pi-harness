@@ -1,6 +1,6 @@
 {
   "name": "@hcflabs/pi-task-models",
-  "version": "9.2.0",
+  "version": "9.3.0",
   "description": "Shared task model profiles and routing for hcflabs Pi extensions.",
   "keywords": [
     "pi-package",

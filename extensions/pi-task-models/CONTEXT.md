@@ -16,6 +16,10 @@ _Avoid_: package-owned model picker, per-extension model catalog
 One model reference and thinking level resolved against Pi's available text models in the current session scope. A scope-pinned thinking level remains binding.
 _Avoid_: free-form provider path, copied model metadata
 
+**Task Profile Model**:
+A Pi virtual model `task/<profile>` for one Task Profile. Each request uses the primary Task Route, then the fallback after a retryable error.
+_Avoid_: model alias, alias model
+
 **Task Route Attempt**:
 A frozen record for one executed Task Route. The optional `onAttempt(record)` observer receives it after execution without changing the result or fallback decision. It contains the route index, resolved model reference, outcome, duration, and an optional bounded error code. It contains no request data, route result, or error message text.
 _Avoid_: prompt log, model output log

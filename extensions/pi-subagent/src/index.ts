@@ -20,6 +20,8 @@ import {
 	PROFILE_NAMES,
 	resolveConfiguredTaskRoute,
 	resolveTaskModelRoute,
+	TASK_PROFILE_MODELS_EXTENSION,
+	taskProfileModelReference,
 	type AvailableModel,
 	type ModelTask,
 	type ProfileName,
@@ -189,6 +191,11 @@ export interface PreparedRoleLaunch extends ResolvedRoleLaunch {
 export interface CreateRoleLaunchInput {
 	role: Role;
 	route: ResolvedTaskRoute;
+	/**
+	 * Task Profile of the route. When set, the child selects the Task Profile Model `task/<profile>`,
+	 * so a retryable error on the primary route moves the child to the fallback route.
+	 */
+	failoverProfile?: ProfileName;
 	extensions?: readonly string[];
 	tools?: readonly string[];
 	env?: Readonly<Record<string, string>>;
@@ -618,6 +625,14 @@ function resolveConfiguredRoute(
 	throw new Error(`No usable ${profileName} task model route. Run /task-models.`);
 }
 
+/** Return the profile when it has a primary and a fallback route that resolve in this session, so failover can help. */
+function failoverProfile(ctx: TaskRouteContext, profileName: ProfileName, agentDir = getAgentDir()): ProfileName | undefined {
+	const profile = loadTaskModelsConfig(agentDir).value.profiles[profileName];
+	if (!profile) return undefined;
+	const usable = orderedProfileRoutes(profile).filter((route) => resolveTaskModelRoute(ctx, route) !== undefined);
+	return usable.length > 1 ? profileName : undefined;
+}
+
 export function resolveRoleSkills(pi: Pick<ExtensionAPI, "getCommands">, role: Role): ResolvedRoleSkills {
 	const skills = new Map(pi.getCommands()
 		.filter((command) => command.source === "skill")
@@ -690,6 +705,8 @@ function prepareRoleLaunchFromSkills(
 		ROLE_MCP_EXTENSION,
 		...(role.tools.includes("git_read") ? [GIT_READ_EXTENSION] : []),
 		ROLE_TOOLS_EXTENSION,
+		// The child runs with --no-extensions, so it loads the Task Profile Models only from this path.
+		...(input.failoverProfile ? [TASK_PROFILE_MODELS_EXTENSION] : []),
 	];
 	const env = Object.fromEntries(Object.entries(input.env ?? {}).map(([key, value]) => {
 		if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new Error(`Invalid launch environment name: ${key}`);
@@ -701,7 +718,7 @@ function prepareRoleLaunchFromSkills(
 	for (const extension of new Set(extensions)) args.push("--extension", extension);
 	for (const skill of skills.paths) args.push("--skill", skill);
 	args.push(`--${ROLE_TOOL_POLICY_FLAG}`, JSON.stringify(tools));
-	args.push("--model", modelReference(input.route.model));
+	args.push("--model", input.failoverProfile ? taskProfileModelReference(input.failoverProfile) : modelReference(input.route.model));
 	if (input.route.thinkingLevel) args.push("--thinking", input.route.thinkingLevel);
 	args.push(ctx.isProjectTrusted() ? "--approve" : "--no-approve");
 	return {
@@ -724,11 +741,16 @@ function prepareResolvedRoleLaunch(
 ): PreparedRoleLaunch {
 	const { task, modelClass, agentDir, ...launchInput } = input;
 	const selectedClass = modelClass ?? input.role.modelClass;
+	const route = selectedClass === undefined
+		? resolveConfiguredTaskRoute(ctx, task, agentDir)
+		: resolveTaskRoute(ctx, selectedClass, agentDir);
+	// The route resolved, so the config loads. A task without a class uses its assigned or declared profile.
+	const profileName = selectedClass ?? loadTaskModelsConfig(agentDir).value.tasks[task.id] ?? task.defaultProfile;
+	const failover = failoverProfile(ctx, profileName, agentDir);
 	return prepareRoleLaunchFromSkills(ctx, {
 		...launchInput,
-		route: selectedClass === undefined
-			? resolveConfiguredTaskRoute(ctx, task, agentDir)
-			: resolveTaskRoute(ctx, selectedClass, agentDir),
+		route,
+		...(failover ? { failoverProfile: failover } : {}),
 	}, resolveRoleSkills(pi, input.role));
 }
 
@@ -791,9 +813,12 @@ export async function resolveConfiguredRoleLaunch(
 		...namedSkills,
 		paths: [...new Set([...namedSkills.paths, ...resources.skills])],
 	};
+	const route = resolveTaskRoute(ctx, input.modelClass);
+	const failover = failoverProfile(ctx, input.modelClass);
 	const prepared = prepareRoleLaunchFromSkills(ctx, {
 		role: effectiveRole,
-		route: resolveTaskRoute(ctx, input.modelClass),
+		route,
+		...(failover ? { failoverProfile: failover } : {}),
 	}, skills);
 	assertNoMissingRoleSkills(effectiveRole, prepared);
 	const args = [
