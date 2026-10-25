@@ -19,12 +19,8 @@ Output tokens per second measured from the first streamed content to the last fo
 Cumulative time spent in agent runs, including automatic retries and auto-compaction. User-prompt waits, idle time between runs, and standalone manual compaction are excluded.
 _Avoid_: Session age, response duration, session time
 
-**Family status**:
-The active Codex account's quota status, reserved for the right side of the first footer line.
-_Avoid_: External extension status, plugin summary
-
 **External status line**:
-The third-line area for CodeGraph and other extension statuses not assigned to the PR or quota positions. It includes both first-party and external extensions.
+The third-line area for CodeGraph and other extension statuses not assigned to the PR position. It includes both first-party and external extensions.
 _Avoid_: rewritten status
 
 **Footer color role**:

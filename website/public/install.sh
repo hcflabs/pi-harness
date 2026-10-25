@@ -27,7 +27,6 @@ EXTENSIONS='
 @hcflabs/pi-goal
 @hcflabs/pi-herdr-tools
 @hcflabs/pi-memory
-@hcflabs/pi-multi-codex
 @hcflabs/pi-notes
 @hcflabs/pi-prompt-creator
 @hcflabs/pi-session-recall

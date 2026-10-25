@@ -73,7 +73,7 @@ function setupFooter(
 	};
 }
 
-test("renders family status on the first line and external statuses beside runtime", async (t) => {
+test("renders identity on the first line and external statuses beside runtime", async (t) => {
 	const agentDir = await mkdtemp(join(tmpdir(), "pi-footer-"));
 	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 	const previousCapabilities = getCapabilities();
@@ -117,7 +117,6 @@ test("renders family status on the first line and external statuses beside runti
 	const colors: [string, string][] = [];
 	let extensionStatuses = new Map([
 		["ponytail", "●  🐴\tponytail: ⚡ FULL\r\nready"],
-		["pi-multi-codex", "Codex #1 · 50% · 7d 1d 1h 22m"],
 		["pi-rewind", "↩ rewind"],
 		["hidden", ""],
 	]);
@@ -136,10 +135,9 @@ test("renders family status on the first line and external statuses beside runti
 	assert.ok(colors.some(([color, text]) => color === "accent" && text === "clear-field-f8d2"));
 	const usageText = "↑ 3.2k · ↓ 500 · ↺ 50.0% · ⚡ — · $ 0.390 · ◔ 42.3%";
 	const modelText = "gpt-5.6-luna • high";
-	assert.match(stripTerminalSequences(rendered[0]!), /^repo · clear-field-f8d2 +Codex #1 · 50% · 7d 1d 1h 22m$/);
+	assert.equal(stripTerminalSequences(rendered[0]!), "repo · clear-field-f8d2");
 	assert.match(stripTerminalSequences(rendered[1]!), new RegExp(`^${usageText.replace("$", "\\$")} +${modelText}$`));
 	assert.match(stripTerminalSequences(rendered[2]!), /^↩ rewind · ●  🐴\tponytail: ⚡ FULL ready +◷ 0s$/);
-	assert.doesNotMatch(rendered[2]!, /Codex/);
 
 	// Narrow width: external status truncates first so the runtime stays visible.
 	const narrow = stripTerminalSequences(footer.render(30)[2]!);
@@ -147,12 +145,9 @@ test("renders family status on the first line and external statuses beside runti
 
 	extensionStatuses = new Map([
 		["pi-rewind", "↩ rewind"],
-		["pi-multi-codex", "  \r\n  "],
 		["hidden", "\n"],
 	]);
-	const withoutFamilyStatus = footer.render(100);
-	assert.equal(stripTerminalSequences(withoutFamilyStatus[0]!), "repo · clear-field-f8d2");
-	assert.match(stripTerminalSequences(withoutFamilyStatus[2]!), /^↩ rewind +◷ 0s$/);
+	assert.match(stripTerminalSequences(footer.render(100)[2]!), /^↩ rewind +◷ 0s$/);
 
 	const openInConfig = join(agentDir, "config", "pi-open-in", "config.json");
 	await mkdir(join(agentDir, "config", "pi-open-in"), { recursive: true });
