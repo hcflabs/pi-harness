@@ -16,10 +16,14 @@ import {
 	resolveConfiguredTaskRoutes,
 	resolveTaskModelRoute,
 	taskThinkingLevels,
+	routeTaskProfile,
+	taskProfileModelReference,
+	TASK_PROFILE_MODELS_EXTENSION,
 	type ModelTask,
 	type TaskRouteAttempt,
 } from "@hcflabs/pi-task-models";
 import registerTaskModelsExtension from "../extensions/task-models.ts";
+import registerTaskProfileModels from "../extensions/task-profile-models.ts";
 
 const EXAMPLE_TASK = {
 	id: "pi-example/review",
@@ -73,6 +77,7 @@ function controlPlane(events: ReturnType<typeof eventBus>, agentDir: string) {
 		registerCommand(_name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) {
 			handler = command.handler;
 		},
+		registerVirtualModel() {},
 	};
 	registerTaskModelsExtension(pi as never, { agentDir });
 	assert.ok(handler);
@@ -1179,6 +1184,7 @@ test("registers model tasks idempotently and discovers them in either load order
 				registerCommand(_name: string, command: { handler: (args: string, ctx: any) => Promise<void> }) {
 					handler = command.handler;
 				},
+				registerVirtualModel() {},
 			};
 			const register = () => registerModelTask(pi as never, EXAMPLE_TASK);
 			if (consumerFirst) register();
@@ -1352,6 +1358,76 @@ test("task-models configures primary and fallback atomically in one profile flow
 		ctx.ui.notify = (message: string) => { notifications.push(message); };
 		await handler("", ctx);
 		assert.ok(notifications.some((message) => message.startsWith("Couldn't save task model config: ")));
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+function routeModel(provider: string, id: string, extra: Record<string, unknown> = {}) {
+	return { provider, id, api: "openai-completions", input: ["text"], reasoning: true, ...extra } as any;
+}
+
+test("a Task Profile Model uses the next route after a retryable failure and skips it during the cooldown", () => {
+	const primary = routeModel("route-test", `primary-${Date.now()}`);
+	const fallback = routeModel("route-test", `fallback-${Date.now()}`);
+	const routes = [{ model: primary, thinkingLevel: "high" }, { model: fallback, thinkingLevel: "medium" }] as any;
+	const now = 1_000_000;
+	assert.equal(routeTaskProfile(routes, { reason: "user" }, now).model, primary);
+
+	const failure = (model: unknown, errorMessage: string) =>
+		({ reason: "retry", failed: { model, message: { stopReason: "error", errorMessage } } }) as any;
+	assert.equal(routeTaskProfile(routes, failure(primary, "prompt is too long: context length exceeded"), now).model, primary,
+		"a context overflow keeps the route");
+	assert.equal(routeTaskProfile(routes, failure(primary, "503 Service Unavailable"), now).model, fallback);
+
+	// The primary has a cooldown, so new turns and continuations stay on the fallback.
+	assert.equal(routeTaskProfile(routes, { reason: "user" }, now + 1000).model, fallback);
+	assert.equal(routeTaskProfile(routes, { reason: "continuation", previous: { model: fallback } } as any, now + 1000).model, fallback);
+	// After the cooldown, a new turn keeps the previous route for its prompt cache.
+	const later = now + 11 * 60_000;
+	assert.equal(routeTaskProfile(routes, { reason: "user", previous: { model: fallback } } as any, later).model, fallback);
+	assert.equal(routeTaskProfile(routes, { reason: "user" }, later).model, primary);
+
+	// When both routes fail, the router still returns a route.
+	assert.equal(routeTaskProfile(routes, failure(fallback, "overloaded"), now + 2000).model, primary);
+	const single = [{ model: routeModel("route-test", `single-${Date.now()}`), thinkingLevel: "low" }] as any;
+	assert.equal(routeTaskProfile(single, failure(single[0].model, "429 rate limit"), now).model, single[0].model);
+	assert.throws(() => routeTaskProfile([], { reason: "user" }), /must not be empty/);
+});
+
+test("registers one Task Profile Model for each profile and routes it from the current config", () => {
+	const dir = tempDir();
+	try {
+		const virtualModels: any[] = [];
+		registerTaskProfileModels({ registerVirtualModel: (model: unknown) => virtualModels.push(model) } as never, { agentDir: dir });
+		assert.deepEqual(virtualModels.map(({ provider, id }) => `${provider}/${id}`), ["fast", "balanced", "frontier", "fav"].map((profile) =>
+			taskProfileModelReference(profile as never)));
+		assert.ok(TASK_PROFILE_MODELS_EXTENSION.endsWith("task-profile-models.ts"));
+
+		const frontier = virtualModels.find(({ id }) => id === "frontier");
+		const primary = routeModel("route-config", "primary", { thinkingLevelMap: {} });
+		const fallback = routeModel("route-config", "fallback");
+		const taskModel = routeModel("task", "fast");
+		const ctx = { modelRegistry: { getAvailable: () => [taskModel, primary, fallback] } };
+		assert.throws(() => frontier.route({ reason: "user" }, ctx), /not configured/);
+
+		mkdirSync(join(dir, "config", "pi-task-models"), { recursive: true });
+		writeFileSync(configFile(dir), JSON.stringify({
+			profiles: {
+				frontier: {
+					primary: { model: "route-config/primary", thinkingLevel: "high" },
+					fallback: { model: "route-config/fallback", thinkingLevel: "medium" },
+				},
+				fast: { primary: { model: "task/fast", thinkingLevel: "low" } },
+			},
+		}));
+		assert.deepEqual(frontier.route({ reason: "user" }, ctx), { model: primary, thinkingLevel: "high" });
+		assert.deepEqual(
+			frontier.route({ reason: "retry", failed: { model: primary, message: { errorMessage: "502 Bad Gateway" } } }, ctx),
+			{ model: fallback, thinkingLevel: "medium" },
+		);
+		const fast = virtualModels.find(({ id }) => id === "fast");
+		assert.throws(() => fast.route({ reason: "user" }, ctx), /no available route/, "a Task Route cannot name a Task Profile Model");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

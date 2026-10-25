@@ -821,6 +821,46 @@ test("Role launch resolves call, Role, then Model Task routes", async (t) => {
 	assert.equal(taskDefault.thinkingLevel, "high");
 });
 
+test("Role launch selects the Task Profile Model when the profile has a usable fallback", async (t) => {
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-subagent-failover-"));
+	t.after(async () => { await rm(agentDir, { recursive: true, force: true }); });
+	await mkdir(join(agentDir, "config", "pi-task-models"), { recursive: true });
+	const primary = { provider: "test", id: "primary", api: "openai-completions", input: ["text"], reasoning: true } as any;
+	const fallback = { ...primary, id: "fallback" };
+	await writeFile(join(agentDir, "config", "pi-task-models", "config.json"), JSON.stringify({
+		profiles: {
+			frontier: {
+				primary: { model: "test/primary", thinkingLevel: "high" },
+				fallback: { model: "test/fallback", thinkingLevel: "high" },
+			},
+			fast: {
+				primary: { model: "test/primary", thinkingLevel: "low" },
+				fallback: { model: "test/missing", thinkingLevel: "low" },
+			},
+		},
+	}));
+	const role: Role = { name: "worker", description: "Works", tools: ["read"], extensions: [], skills: [], systemPrompt: "Work." };
+	const pi = { getCommands: () => [] } as unknown as Pick<ExtensionAPI, "getCommands">;
+	const ctx = { model: primary, scopedModels: [], modelRegistry: { getAvailable: () => [primary, fallback] }, isProjectTrusted: () => false };
+	const task = { id: "pi-example/work", label: "Work", purpose: "Do one task.", defaultProfile: "frontier" } as const;
+
+	const launch = resolveRoleLaunch(pi, ctx, { role, task, modelClass: "frontier", agentDir });
+	assert.equal(valueAfter(launch.args, "--model"), "task/frontier");
+	assert.equal(valueAfter(launch.args, "--thinking"), "high");
+	assert.equal(launch.model, primary, "the launch record keeps the primary route");
+	assert.match(valuesAfter(launch.args, "--extension").at(-1)!, /pi-task-models\/extensions\/task-profile-models\.ts$/);
+	// A task without a class uses its declared profile.
+	assert.equal(valueAfter(resolveRoleLaunch(pi, ctx, { role, task, agentDir }).args, "--model"), "task/frontier");
+
+	// A fallback that does not resolve gives no failover, so the child keeps the physical model.
+	const single = resolveRoleLaunch(pi, ctx, { role, task, modelClass: "fast", agentDir });
+	assert.equal(valueAfter(single.args, "--model"), "test/primary");
+	assert.equal(valuesAfter(single.args, "--extension").some((path) => path.endsWith("task-profile-models.ts")), false);
+	// A designated route never uses failover.
+	const designated = createRoleLaunch(pi, ctx, { role, route: { model: fallback, thinkingLevel: "high" } });
+	assert.equal(valueAfter(designated.args, "--model"), "test/fallback");
+});
+
 test("Role package resources resolve enabled paths; configured launches require a class, reject missing Skills, and deduplicate Skills", async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "pi-subagent-package-resources-"));
 	const agentDir = join(directory, "agent");

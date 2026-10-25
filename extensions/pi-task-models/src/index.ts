@@ -1,7 +1,15 @@
+import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { Container, Key, matchesKey, SelectList, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { getAgentDir, getSelectListTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	getAgentDir,
+	getSelectListTheme,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type ModelRoute,
+	type ModelRouteRequest,
+} from "@earendil-works/pi-coding-agent";
 import {
 	createConfigStore,
 	field,
@@ -283,7 +291,8 @@ export function availableTaskModels(ctx: TaskModelContext): AvailableModel[] {
 	const scopedModels = ctx.scopedModels;
 	return dedupeAvailableModels(
 		(scopedModels.length ? scopedModels.map(({ model }) => model) : ctx.modelRegistry.getAvailable())
-			.filter((model) => model.input.includes("text")),
+			// A Task Profile Model routes to Task Routes, so a Task Route cannot name one.
+			.filter((model) => model.input.includes("text") && model.provider !== TASK_MODEL_PROVIDER),
 		ctx.model?.provider,
 	);
 }
@@ -471,6 +480,89 @@ export function orderedProfileRoutes(profile: TaskModelProfile): TaskModelRoute[
 	return profile.fallback ? [profile.primary, profile.fallback] : [profile.primary];
 }
 
+/** Provider of the Task Profile Models `task/<profile>`. */
+export const TASK_MODEL_PROVIDER = "task";
+/** Extension file that registers only the Task Profile Models. Subagent children load it. */
+export const TASK_PROFILE_MODELS_EXTENSION = fileURLToPath(new URL("../extensions/task-profile-models.ts", import.meta.url));
+/** Minutes that a Task Profile Model skips a route after a failed request. */
+export const TASK_ROUTE_COOLDOWN_MINUTES = 10;
+
+const OVERFLOW_ERROR = /context.?(?:length|window|overflow)|too many tokens|prompt is too long|maximum context/i;
+// The cooldown is per process. A subagent child has its own record.
+const coolingRoutes = new Map<string, number>();
+
+/** Model reference `task/<profile>` of the Task Profile Model of a profile. */
+export function taskProfileModelReference(profile: ProfileName): string {
+	return `${TASK_MODEL_PROVIDER}/${profile}`;
+}
+
+function isCooling(reference: string, now: number): boolean {
+	return (coolingRoutes.get(reference) ?? 0) > now;
+}
+
+/**
+ * Pick the Task Route for one request of a Task Profile Model.
+ * - A retry after a context overflow keeps the failed route.
+ * - A retry after another error starts a cooldown for the failed route and uses the next route.
+ * - A continuation keeps the previous route when it is in the profile and has no cooldown.
+ * - Other requests use the first route without a cooldown, and prefer the previous route.
+ * When all routes have a cooldown, the router uses them in the same order.
+ */
+export function routeTaskProfile(
+	routes: readonly ResolvedTaskRoute[],
+	request: Pick<ModelRouteRequest, "reason" | "previous" | "failed">,
+	now = Date.now(),
+	cooldownMinutes = TASK_ROUTE_COOLDOWN_MINUTES,
+): ResolvedTaskRoute {
+	if (!routes.length) throw new Error("Task route list must not be empty.");
+	const references = routes.map(({ model }) => modelReference(model));
+	const indexOf = (model?: { provider: string; id: string }) => model ? references.indexOf(modelReference(model)) : -1;
+	const failed = request.reason === "retry" ? request.failed : undefined;
+	const failedIndex = indexOf(failed?.model);
+	if (failed && failedIndex >= 0 && OVERFLOW_ERROR.test(failed.message.errorMessage ?? "")) return routes[failedIndex]!;
+	if (failed) coolingRoutes.set(modelReference(failed.model), now + cooldownMinutes * 60_000);
+	const previousIndex = indexOf(request.previous?.model);
+	const order = failedIndex >= 0
+		? [...references.keys()].map((offset) => (failedIndex + 1 + offset) % routes.length)
+		: [...(previousIndex >= 0 ? [previousIndex] : []), ...references.keys()];
+	const candidates = [...new Set(order)].filter((index) => index !== failedIndex || routes.length === 1);
+	const ready = candidates.find((index) => !isCooling(references[index]!, now));
+	return routes[ready ?? candidates[0] ?? 0]!;
+}
+
+/**
+ * Register one Task Profile Model `task/<profile>` for each Task Profile. Each request uses a route of
+ * the profile: first the primary, then the fallback. Pi asks the router again after a retryable error
+ * (429, 5xx, overloaded, network, or timeout), and the router then uses the other route.
+ * Profile thinking is authoritative: the selected thinking level does not change the route.
+ */
+export function createTaskProfileModelsExtension(pi: Pick<ExtensionAPI, "registerVirtualModel">, options?: { agentDir?: string }): void {
+	const agentDir = options?.agentDir ?? getAgentDir();
+	const store = taskModelsConfigStore(agentDir);
+	for (const profileName of PROFILE_NAMES) {
+		pi.registerVirtualModel({
+			provider: TASK_MODEL_PROVIDER,
+			id: profileName,
+			name: `Task profile ${profileName}`,
+			thinkingLevels: THINKING_LEVELS,
+			route(request, ctx): ModelRoute {
+				const loaded = store.loadSync();
+				if (loaded.status === "disabled") throw new Error(disabledConfigMessage(store.path, loaded.issues));
+				const profile = loaded.value.profiles[profileName];
+				if (!profile) throw new Error(`Task profile ${profileName} is not configured in ${store.path}. Run /task-models.`);
+				// Resolve against all available models: a session scope can list only Task Profile Models.
+				const routeContext = { model: undefined, scopedModels: [], modelRegistry: ctx.modelRegistry };
+				const routes = orderedProfileRoutes(profile)
+					.map((route) => resolveTaskModelRoute(routeContext, route))
+					.filter((route): route is ResolvedTaskRoute => route !== undefined);
+				if (!routes.length) throw new Error(`Task profile ${profileName} has no available route. Run /task-models.`);
+				const { model, thinkingLevel } = routeTaskProfile(routes, request);
+				return { model, thinkingLevel };
+			},
+		});
+	}
+}
+
 type ModelTaskDiscoveryRequest = { requestId: string };
 type ModelTaskDiscoveryResponse = ModelTaskDiscoveryRequest & { task: ModelTask };
 
@@ -603,6 +695,7 @@ export function createTaskModelsExtension(
 	const repairStore = taskModelsConfigStore(agentDir, true);
 	const presetsStore = taskModelPresetsStore(agentDir);
 	const reporter = registerConfigReporting(pi, [configStore, presetsStore]);
+	createTaskProfileModelsExtension(pi, { agentDir });
 	pi.on("session_start", (_event, ctx) => {
 		if (configStore.loadSync().source === "missing") {
 			ctx.ui.notify(`Task model config is missing at ${configStore.path}; run /task-models to configure task routes.`, "warning");

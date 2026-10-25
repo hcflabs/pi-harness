@@ -32,6 +32,7 @@ Run `/task-models`, select `fast`, then choose a primary model and thinking leve
 | `/task-models status` | command | For people: inspect current task routes, unavailable slots, and config issues. |
 | Option+S / Alt+S in `/task-models` | shortcut | For people: save configured profiles as a named preset in the interactive terminal. |
 | Session start | ui | For people: warn about missing config and config or preset problems. Show an error when routing is disabled. |
+| `task/fast`, `task/balanced`, `task/frontier`, `task/fav` | model | For people and agents: select a Task Profile Model. It fails over from the primary route to the fallback route. |
 
 Configure each profile your consumers require. `fav` has no fallback. Select an active task to override its declared profile; choosing its declared default removes the override.
 
@@ -42,6 +43,20 @@ Run `/task-models status` to inspect each active Model Task with the current con
 Each task line contains the task name and ID, primary model and thinking level, fallback route or `none`, and issues. Unavailable primary and fallback slots remain visible. Route errors contain the `TaskRouteError` code and message. Config and preset issues appear on every status request, including issues reported earlier in the session.
 
 With UI, each notification uses one line and the current theme. The notification truncates text to the terminal width. Without UI, stdout contains the complete lines. The command does not display prompts, messages, reviews, or model output.
+
+### Task Profile Models
+
+A Task Profile Model is a Pi virtual model, `task/<profile>`, for one Task Profile. Select it with `/model` or `--model task/frontier`. Each request uses a route of the profile: first the primary, then the fallback.
+
+1. Pi gets a retryable error on a route: 429, 5xx, overloaded, a network error, or a timeout.
+2. Pi retries the request. The Task Profile Model then uses the next route of the profile.
+3. The failed route gets a cooldown of 10 minutes in this process. New turns use the other route during the cooldown.
+
+A tool continuation keeps the route of the previous response, so the prompt cache stays valid. A retry after a context overflow keeps the same route. Profile thinking is authoritative: the selected thinking level does not change the route.
+
+Pi retries only the errors that it classifies as retryable. A 400, 401, 404, or quota error ends the turn on the failed route. Pi waits between retries and uses `retry.maxRetries` from Pi settings. A Task Route cannot name a Task Profile Model.
+
+`@hcflabs/pi-subagent` gives a worker the Task Profile Model when its profile has two usable routes. The worker loads only `extensions/task-profile-models.ts`, because workers run with `--no-extensions`.
 
 ### Presets
 
@@ -77,7 +92,7 @@ Package-owned: `~/.pi/agent/config/pi-task-models/config.json`. Only explicit `/
 | `profiles` | Stores shared routes. | Object keyed by `fast`, `balanced`, `frontier`, or `fav`. | `{}` |
 | `profiles.<profile>.primary.model` | Required primary model. | Canonical `provider/model` without whitespace or NUL. | — |
 | `profiles.<profile>.primary.thinkingLevel` | Required primary thinking level. | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; model support required at resolution. | — |
-| `profiles.<profile>.fallback` | Route to try when the primary is unavailable. | Object requiring `model` and `thinkingLevel`, with primary rules. Forbidden for `fav`. | No fallback. |
+| `profiles.<profile>.fallback` | Route to try when the primary is unavailable or fails with a retryable error. | Object requiring `model` and `thinkingLevel`, with primary rules. Forbidden for `fav`. | No fallback. |
 | `tasks` | Explicit profile overrides. | Object mapping `<package>/<task>` IDs to profiles. | `{}` |
 | `tasks.<taskId>` | Overrides the declared profile. | `fast`, `balanced`, `frontier`, or `fav`. | Task declaration's `defaultProfile`. |
 
@@ -136,7 +151,13 @@ Applying a preset can create missing active config. Config problems require conf
 | `resolveConfiguredTaskRoutes(ctx, task, agentDir?, thinking?)` | function | Resolves configured task route candidates. |
 | `executeTaskRoutes(routes, attempt, { shouldFallback, signal?, onAttempt? })` | function | Tries resolved routes in order. Returns first success and can report each executed route. |
 | `orderedProfileRoutes(profile)` | function | Returns primary, then optional fallback. |
-| `createTaskModelsExtension(pi, options?)` (also default export) | function | Registers `/task-models`, missing-config warnings, and issue reporting. |
+| `createTaskModelsExtension(pi, options?)` (also default export) | function | Registers `/task-models`, missing-config warnings, issue reporting, and the Task Profile Models. |
+| `createTaskProfileModelsExtension(pi, options?)` | function | Registers only the Task Profile Models. `extensions/task-profile-models.ts` exports it as default. |
+| `TASK_MODEL_PROVIDER` | constant | Provider of the Task Profile Models: `task`. |
+| `TASK_PROFILE_MODELS_EXTENSION` | constant | Absolute path of `extensions/task-profile-models.ts`, for a child Pi process. |
+| `TASK_ROUTE_COOLDOWN_MINUTES` | constant | Minutes that a failed route stays skipped: `10`. |
+| `taskProfileModelReference(profile)` | function | Returns `task/<profile>`. |
+| `routeTaskProfile(routes, request, now?, cooldownMinutes?)` | function | Picks the route for one request of a Task Profile Model. |
 
 Model and route helpers use only `ctx.model`, `ctx.scopedModels`, and `ctx.modelRegistry.getAvailable()`. They do not require UI methods, so consumers can use supported Pi releases. Profile thinking is authoritative; resolution uses `config.tasks[task.id] ?? task.defaultProfile`.
 

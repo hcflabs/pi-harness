@@ -11,6 +11,7 @@ An Architecture Decision Record (ADR) records one current architecture choice. T
 - [017 — Consumer-Owned Task-Model Routing](017-consumer-owned-task-model-routing.md)
 - [018 — Extension Config Homes](018-extension-config-homes.md)
 - [022 — Multi-Repo Targets and Command Panes](022-multi-repo-targets-and-command-panes.md)
+- [023 — Task Profile Models for Runtime Failover](023-task-profile-models.md)
 
 ## Package architecture
 
