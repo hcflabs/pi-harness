@@ -53,6 +53,8 @@ Only Git-root lockfiles count. Package managers handle root npm and uv workspace
 
 After ten minutes of `running` status, the TUI watcher removes the status file, clears the footer, and reports an error with the log path. It stops watching, not the installer. Opening Pi again cannot restore removed status.
 
+If the watcher cannot read the status file, it stops and shows one warning with the file path and the error code. A file that is not valid JSON gets three reads before the watcher stops, because the installer can be in the middle of a write. Other read errors, such as `EACCES` or `EISDIR`, stop the watcher at once. The watcher keeps the file, so each new session shows the warning again. Examine the file, then remove it.
+
 Closing Pi stops its watcher and animation, but does not cancel the installer or consume its pending result.
 
 For failures, including missing executables, examine `<worktree gitdir>/pi-deps/install.log` for command output and `pi-deps:` messages. The log remains after status removal.
