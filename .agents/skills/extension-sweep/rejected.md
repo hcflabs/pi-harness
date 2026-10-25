@@ -19,7 +19,6 @@ Scouts must not report these again unless the cited code or its call frequency c
 | pi-session-recall | Session walk; inventory bound; `maxFittingCap` serialization | Small real data, 10 KB cap, or pattern miner only. | #468, 2026-10-20 |
 | pi-session-recall | Reuse `pi-process` for `runGit` | Not a drop-in swap (environment, byte parsing). | 2026-10-20 |
 | pi-session-recall | Incremental indexing of appended session data | Medium risk; maintainer deferred. | 2026-10-20 |
-| pi-cron | Config and state reload per tick; `Intl` formatter cache | Real config is 263 bytes; one tick per 60 s. | 2026-10-20 |
 | pi-add-dir | Instruction reads per turn; `promptGuidelines` trim | Keeps edits live; maintainer deferred prompt trims. | #468, 2026-10-20 |
 | pi-auto-compact | Use `ctx.model.contextWindow` before `getContextUsage()` | Routed-model window risk for small gain. | 2026-10-20 |
 | pi-footer, pi-notes, pi-codegraph, pi-ask-question | Usage loop; notes Git pruning; startup probes; snippet tokens | Linear, no records, startup only, or about 20 tokens. | #468 |

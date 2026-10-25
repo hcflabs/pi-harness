@@ -21,7 +21,6 @@ EXTENSIONS='
 @hcflabs/pi-ask-question
 @hcflabs/pi-auto-compact
 @hcflabs/pi-codegraph
-@hcflabs/pi-cron
 @hcflabs/pi-deps
 @hcflabs/pi-footer
 @hcflabs/pi-goal
