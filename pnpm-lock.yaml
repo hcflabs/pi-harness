@@ -34,7 +34,7 @@ importers:
   extensions/pi-advisor:
     dependencies:
       '@hcflabs/pi-task-models':
-        specifier: ^9.0.0
+        specifier: ^9.2.0
         version: link:../pi-task-models
     devDependencies:
       '@earendil-works/pi-coding-agent':
@@ -57,7 +57,7 @@ importers:
         specifier: ^4.0.0
         version: link:../../packages/pi-config-store
       '@hcflabs/pi-task-models':
-        specifier: ^9.0.0
+        specifier: ^9.2.0
         version: link:../pi-task-models
     devDependencies:
       '@earendil-works/pi-coding-agent':

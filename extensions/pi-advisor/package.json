@@ -1,6 +1,6 @@
 {
   "name": "@hcflabs/pi-advisor",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Opt-in second-model review of each Pi agent run after it settles, with graded notes and one blocker follow-up.",
   "keywords": [
     "pi-package",
@@ -28,7 +28,7 @@
     "@earendil-works/pi-coding-agent": "^1.3.0"
   },
   "dependencies": {
-    "@hcflabs/pi-task-models": "^9.0.0"
+    "@hcflabs/pi-task-models": "^9.2.0"
   },
   "repository": {
     "type": "git",
