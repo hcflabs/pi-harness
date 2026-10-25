@@ -26,6 +26,7 @@ import {
 	type ModelTask,
 	type ResolvedTaskRoute,
 	type TaskRouteError,
+	type TaskRouteAttempt,
 } from "@hcflabs/pi-task-models";
 
 type AgentMessage = Parameters<typeof estimateTokens>[0];
@@ -45,11 +46,16 @@ function isValidThreshold(value: unknown): value is number {
 }
 
 /** `report` shows new task-model config issues before the routes resolve. */
-function configuredTaskRoutes(ctx: ExtensionContext, report: (ctx: ExtensionContext) => void): ResolvedTaskRoute[] {
+function configuredTaskRoutes(
+	ctx: ExtensionContext,
+	report: (ctx: ExtensionContext) => void,
+	record: CompactionAttempt,
+): ResolvedTaskRoute[] {
 	report(ctx);
 	try {
 		return resolveConfiguredTaskRoutes(ctx, AUTO_COMPACT_TASK);
 	} catch (error) {
+		record.fallbackCode = errorCode(error);
 		const { taskRouteCode, profileName } = error as TaskRouteError;
 		if (taskRouteCode === "config-missing") return [];
 		// pi-task-models messages give the path and the problems; only `no-route` gets compaction wording.
@@ -58,6 +64,34 @@ function configuredTaskRoutes(ctx: ExtensionContext, report: (ctx: ExtensionCont
 			: `${error instanceof Error ? error.message : String(error)} Using current session model.`, "error");
 		return [];
 	}
+}
+
+type CompactionAttempt = {
+	time: string;
+	trigger: string;
+	routes: TaskRouteAttempt[];
+	durationMs: number;
+	outcome: "running" | "succeeded" | "failed" | "aborted" | "discarded";
+	errorCode?: string;
+	fallbackCode?: string;
+	retriesStopped: string;
+};
+
+/** Read error metadata only. Never copy error message text or thrown strings. */
+function errorCode(error: unknown): string {
+	try {
+		const fields = error && typeof error === "object" ? error as Record<string, unknown> : {};
+		for (const key of ["taskRouteCode", "code"]) {
+			if (typeof fields[key] !== "string") continue;
+			const code = (fields[key] as string).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim().slice(0, 64);
+			if (code) return code;
+		}
+		if (typeof fields.status === "number" && Number.isFinite(fields.status)) return `http-${fields.status}`;
+		if (typeof fields.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(fields.name)) return fields.name;
+	} catch {
+		// Error metadata must not prevent a status record.
+	}
+	return "error";
 }
 
 function withoutDeletedHeaders(headers: Record<string, string | null> | undefined): Record<string, string> | undefined {
@@ -259,6 +293,27 @@ export default function (pi: ExtensionAPI) {
 	let compactionPending = false;
 	let compactionAbortExpected = false;
 	let failedBoundary: { session: string; leaf: string | null } | undefined;
+	let lastAttempt: CompactionAttempt | undefined;
+	const beginAttempt = (trigger: string) => {
+		const record: CompactionAttempt = {
+			time: new Date().toISOString(), trigger, routes: [], durationMs: 0,
+			outcome: "running", retriesStopped: "not stopped",
+		};
+		lastAttempt = record;
+		const started = performance.now();
+		return {
+			record,
+			finish(outcome: CompactionAttempt["outcome"], retriesStopped: string, error?: unknown) {
+				record.durationMs = performance.now() - started;
+				record.outcome = outcome;
+				record.retriesStopped = retriesStopped;
+				if (error !== undefined || outcome === "failed" || outcome === "aborted") record.errorCode = errorCode(error);
+			},
+		};
+	};
+	let pendingAttempt: ReturnType<typeof beginAttempt> | undefined;
+	let nativeStarted: number | undefined;
+	let compactionSignal: AbortSignal | undefined;
 
 	const maintainBoundary = async (event: BoundaryEvent, ctx: ExtensionContext) => {
 		if (!active || compactionPending || event.outcome !== "completed" || ctx.signal?.aborted || !ctx.model) return;
@@ -339,45 +394,82 @@ export default function (pi: ExtensionAPI) {
 			settings,
 		};
 		const signal = ctx.signal;
+		const attempt = beginAttempt(event.type);
 		try {
-			const routes = configuredTaskRoutes(ctx, reportTaskModels);
+			const routes = configuredTaskRoutes(ctx, reportTaskModels, attempt.record);
 			let result: Awaited<ReturnType<typeof compact>> | undefined;
 			if (routes.length) {
 				try {
 					result = await executeTaskRoutes(routes, (route) =>
-						summarize(ctx, preparation, route.model, route.thinkingLevel, signal), { signal, shouldFallback: () => true });
-				} catch {
-					if (!signal?.aborted) ctx.ui.notify("Configured task model routes failed; using current session model.", "error");
+						summarize(ctx, preparation, route.model, route.thinkingLevel, signal), {
+							signal, shouldFallback: () => true, onAttempt: (route) => { attempt.record.routes.push(route); },
+						});
+				} catch (error) {
+					attempt.record.fallbackCode = errorCode(error);
+					if (!signal?.aborted) ctx.ui.notify(`Configured task model routes failed (${errorCode(error)}); using current session model.`, "error");
 				}
 			}
-			if (!result && !signal?.aborted) result = await summarize(ctx, preparation, ctx.model, ctx.thinkingLevel, signal);
-			if (signal?.aborted || ctx.sessionManager.getSessionId() !== session || ctx.sessionManager.getLeafId() !== leaf) return;
-			if (!result?.summary.trim()) throw new Error("Compaction returned an empty summary.");
+			if (!result && !signal?.aborted) result = await executeTaskRoutes(
+				[{ model: ctx.model, thinkingLevel: ctx.thinkingLevel ?? "off" }],
+				(route) => summarize(ctx, preparation, route.model, ctx.thinkingLevel, signal),
+				{ signal, shouldFallback: () => false, onAttempt: (route) => { attempt.record.routes.push(route); } },
+			);
+			if (signal?.aborted) {
+				attempt.finish("aborted", "signal aborted", signal.reason);
+				return;
+			}
+			if (ctx.sessionManager.getSessionId() !== session || ctx.sessionManager.getLeafId() !== leaf) {
+				attempt.finish("discarded", "session or branch changed");
+				return;
+			}
+			if (!result?.summary.trim()) throw Object.assign(new Error("Compaction returned an empty summary."), { code: "empty-summary" });
+			attempt.finish("succeeded", "completed");
 			return { entries: [...event.entries, ...edits, {
 				type: "compaction" as const, summary: result.summary,
 				firstKeptEntryId: result.firstKeptEntryId, details: result.details, usage: result.usage,
 			}] };
-		} catch {
-			if (ctx.sessionManager.getSessionId() !== session || ctx.sessionManager.getLeafId() !== leaf) return;
+		} catch (error) {
+			if (ctx.sessionManager.getSessionId() !== session || ctx.sessionManager.getLeafId() !== leaf) {
+				attempt.finish("discarded", "session or branch changed", error);
+				return;
+			}
+			attempt.finish(signal?.aborted ? "aborted" : "failed",
+				signal?.aborted ? "signal aborted" : "failed boundary. No retry until the next boundary", error);
 			if (!signal?.aborted) {
 				failedBoundary = { session, leaf };
-				ctx.ui.notify("Auto-compaction failed. Check model routes and authentication; run /compact to retry manually.", "error");
+				ctx.ui.notify(`Auto-compaction failed (${errorCode(error)}). Check model routes and authentication. Run /compact to retry manually.`, "error");
 			}
 			return edits.length && !signal?.aborted ? { entries: [...event.entries, ...edits] } : undefined;
 		}
 	};
 
-	const runCompaction = (ctx: ExtensionContext) => {
+	const runCompaction = (ctx: ExtensionContext, trigger: string) => {
+		const attempt = beginAttempt(trigger);
+		pendingAttempt = attempt;
+		nativeStarted = undefined;
+		compactionSignal = undefined;
+		const nativeModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+		const recordNative = (outcome: TaskRouteAttempt["outcome"], error?: unknown) => {
+			if (nativeStarted === undefined || !nativeModel) return;
+			attempt.record.routes.push(Object.freeze({
+				routeIndex: 0, model: nativeModel, outcome,
+				durationMs: performance.now() - nativeStarted,
+				...(outcome === "succeeded" ? {} : { errorCode: errorCode(error) }),
+			}));
+		};
 		compactionAbortExpected = Boolean(ctx.signal && !ctx.signal.aborted);
 		ctx.compact({
 			customInstructions: COMPACTION_INSTRUCTIONS,
 			onComplete: () => {
+				if (lastAttempt !== attempt.record) return;
+				recordNative("succeeded");
+				attempt.finish("succeeded", "completed");
 				compactionPending = false;
 				compactionAbortExpected = false;
 				// Pi may flush queued input during compaction_end. Wait one macrotask
 				// before checking idle, otherwise follow-up can race that flush.
 				setImmediate(() => {
-					if (!ctx.isIdle()) return;
+					if (lastAttempt !== attempt.record || !ctx.isIdle()) return;
 					pi.sendMessage({
 						customType: RESUME_MESSAGE_TYPE,
 						content: RESUME_MESSAGE,
@@ -385,7 +477,11 @@ export default function (pi: ExtensionAPI) {
 					}, { triggerTurn: true });
 				});
 			},
-			onError: () => {
+			onError: (error) => {
+				if (lastAttempt !== attempt.record) return;
+				const aborted = compactionSignal?.aborted || errorCode(error) === "AbortError";
+				recordNative(aborted ? "aborted" : "failed", error);
+				attempt.finish(aborted ? "aborted" : "failed", "native compaction stopped. The next request can retry", error);
 				compactionPending = false;
 				compactionAbortExpected = false;
 			},
@@ -437,15 +533,28 @@ export default function (pi: ExtensionAPI) {
 		// Mark pending before deferring. Another context event can fire before
 		// setImmediate runs, and must not schedule a second compaction.
 		compactionPending = true;
-		setImmediate(() => runCompaction(ctx));
+		setImmediate(() => runCompaction(ctx, "context_with_system"));
 		return { messages: truncated };
 	});
 
 	pi.registerCommand("auto-compact", {
-		description: "configure automatic compaction threshold",
+		description: "Configure the compaction threshold, or show /auto-compact status.",
 		handler: async (args, ctx) => {
+			if (args.trim() === "status") {
+				const record = lastAttempt;
+				const lines = record ? [
+					`Auto-compact attempt: ${record.time} · trigger ${record.trigger}`,
+					...record.routes.map((route) => `Route ${route.model}: ${route.outcome} · ${Math.round(route.durationMs)} ms${route.errorCode ? ` · ${route.errorCode}` : ""}`),
+					`Outcome ${record.outcome} · total ${Math.round(record.durationMs)} ms${record.errorCode ? ` · error ${record.errorCode}` : ""}`,
+					...(record.fallbackCode ? [`Session model fallback: ${record.fallbackCode}`] : []),
+					`Retries: ${record.retriesStopped}`,
+				] : ["No auto-compact attempt in this session."];
+				if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info");
+				else process.stdout.write(`${lines.join("\n")}\n`);
+				return;
+			}
 			if (args.trim()) {
-				ctx.ui.notify("Usage: /auto-compact", "error");
+				ctx.ui.notify("Usage: /auto-compact [status]", "error");
 				return;
 			}
 
@@ -481,6 +590,13 @@ export default function (pi: ExtensionAPI) {
 	// Pi's built-in automatic compaction competes with this extension. Refuse
 	// activation unless effective global/project settings disable it.
 	pi.on("session_start", (event, ctx) => {
+		lastAttempt = undefined;
+		failedBoundary = undefined;
+		pendingAttempt = undefined;
+		nativeStarted = undefined;
+		compactionSignal = undefined;
+		compactionPending = false;
+		compactionAbortExpected = false;
 		// Launch reporting shows config issues; invalid values use the default.
 		autoCompactThreshold = loadThreshold().threshold;
 
@@ -494,7 +610,7 @@ export default function (pi: ExtensionAPI) {
 		const usage = ctx.getContextUsage();
 		if (usage?.percent == null || usage.percent <= autoCompactThreshold) return;
 		compactionPending = true;
-		runCompaction(ctx);
+		runCompaction(ctx, event.reason);
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
@@ -510,8 +626,15 @@ export default function (pi: ExtensionAPI) {
 		for (const path of prior.read) event.preparation.fileOps.read.add(path);
 		for (const path of prior.edited) event.preparation.fileOps.edited.add(path);
 
-		const routes = configuredTaskRoutes(ctx, reportTaskModels);
-		if (!routes.length) return;
+		const attempt = pendingAttempt;
+		if (!attempt) return;
+		nativeStarted = undefined;
+		compactionSignal = event.signal;
+		const routes = configuredTaskRoutes(ctx, reportTaskModels, attempt.record);
+		if (!routes.length) {
+			nativeStarted = performance.now();
+			return;
+		}
 
 		try {
 			return await executeTaskRoutes(
@@ -519,10 +642,14 @@ export default function (pi: ExtensionAPI) {
 				async (route) => ({
 					compaction: await summarize(ctx, event.preparation, route.model, route.thinkingLevel, event.signal),
 				}),
-				{ signal: event.signal, shouldFallback: () => true },
+				{ signal: event.signal, shouldFallback: () => true, onAttempt: (route) => { attempt.record.routes.push(route); } },
 			);
-		} catch {
-			if (!event.signal.aborted) ctx.ui.notify("Configured task model routes failed; using current session model.", "error");
+		} catch (error) {
+			attempt.record.fallbackCode = errorCode(error);
+			if (!event.signal.aborted) {
+				ctx.ui.notify(`Configured task model routes failed (${errorCode(error)}); using current session model.`, "error");
+				nativeStarted = performance.now();
+			}
 		}
 	});
 }

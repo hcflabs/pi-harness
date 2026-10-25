@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
 	executeTaskRoutes, registerModelTask, registerTaskModelsConfigReporting, resolveConfiguredTaskRoutes,
-	type ModelTask, type ResolvedTaskRoute,
+	type ModelTask, type ResolvedTaskRoute, type TaskRouteAttempt,
 } from "@hcflabs/pi-task-models";
 
 export const ADVISOR_ENTRY = "pi-advisor";
@@ -101,11 +101,21 @@ function formatNotes(notes: Note[]): string {
 	return notes.map((note) => `${note.grade}: ${note.finding} Evidence: ${note.evidence}`).join("\n");
 }
 
+type ReviewRecord = {
+	time: string;
+	model?: string;
+	failedRoutes: Array<Pick<TaskRouteAttempt, "model" | "errorCode">>;
+	durationMs: number;
+	costUsd?: number;
+	verdict: "reviewing" | "pass" | Grade | "malformed" | "failed" | "aborted" | "discarded";
+};
+
 export default function advisorExtension(pi: ExtensionAPI): void {
 	registerModelTask(pi, REVIEW_TASK);
 	const reportTaskModels = registerTaskModelsConfigReporting(pi);
 	// Transient state only; on/off state is always derived from the branch.
-	let malformedShown = false;
+	let malformedCount = 0;
+	let lastReview: ReviewRecord | undefined;
 	let runLeaf: string | null | undefined;
 	let active: AbortController | undefined;
 
@@ -120,7 +130,7 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 		}
 	};
 
-	const review = (ctx: ExtensionContext, resolved: ResolvedTaskRoute[], input: string, signal: AbortSignal) => executeTaskRoutes(resolved, async (route) => {
+	const review = (ctx: ExtensionContext, resolved: ResolvedTaskRoute[], input: string, signal: AbortSignal, record: ReviewRecord) => executeTaskRoutes(resolved, async (route) => {
 		const response = await ctx.modelRegistry.streamSimple(route.model, {
 			systemPrompt: SYSTEM_PROMPT,
 			messages: [{ role: "user", content: input, timestamp: Date.now() }],
@@ -130,8 +140,16 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 			...(route.thinkingLevel === "off" ? {} : { reasoning: route.thinkingLevel }),
 		}).result();
 		if (response.stopReason !== "stop") throw new Error(response.errorMessage || `the model stopped with ${response.stopReason}.`);
+		const cost = response.usage?.cost?.total;
+		if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) record.costUsd = cost;
 		return response.content.flatMap((part) => part.type === "text" ? [part.text] : []).join("");
-	}, { signal, shouldFallback: () => true });
+	}, {
+		signal, shouldFallback: () => true,
+		onAttempt: (attempt) => {
+			if (attempt.outcome === "succeeded") record.model = attempt.model;
+			else record.failedRoutes.push({ model: attempt.model, errorCode: attempt.errorCode });
+		},
+	});
 
 	const cancel = (ctx: ExtensionContext) => {
 		if (!active) return;
@@ -140,16 +158,16 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 		ctx.ui.setStatus(ADVISOR_ENTRY, undefined);
 	};
 
-	const deliver = (ctx: ExtensionContext, reply: string, branch: SessionEntry[]) => {
+	const deliver = (ctx: ExtensionContext, reply: string, branch: SessionEntry[]): ReviewRecord["verdict"] => {
 		const notes = parseReview(reply);
 		if (!notes) {
-			if (!malformedShown) ctx.ui.notify("Advisor reply did not follow the output contract and was ignored.", "warning");
-			malformedShown = true;
-			return;
+			if (malformedCount === 0) ctx.ui.notify("Advisor reply did not follow the output contract and was ignored.", "warning");
+			malformedCount++;
+			return "malformed";
 		}
 		if (!notes.length) {
 			ctx.ui.notify("Advisor: PASS", "info");
-			return;
+			return "pass";
 		}
 		const blockers = notes.filter((note) => note.grade === "blocker");
 		const userIndex = branch.findLastIndex((entry) => entry.type === "message" && entry.message.role === "user");
@@ -159,11 +177,13 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 		const reason = continued ? "The advisor already continued once for this prompt. " : "";
 		ctx.ui.notify(`Advisor:\n${formatNotes(notes)}${held ? `\n${reason}Send a prompt to address the blockers.` : ""}`,
 			notes.some((note) => note.grade !== "nit") ? "warning" : "info");
-		if (!blockers.length || held) return;
+		const verdict: Grade = blockers.length ? "blocker" : notes.some((note) => note.grade === "concern") ? "concern" : "nit";
+		if (!blockers.length || held) return verdict;
 		pi.sendMessage({
 			customType: BLOCKER_MESSAGE, display: true, details: { notes },
 			content: `The advisor reviewed this run and found blockers. Address each blocker, verify the fix with tools, then report the result.\n\n${formatNotes(blockers)}`,
 		}, { triggerTurn: true, deliverAs: "followUp" });
+		return verdict;
 	};
 
 	pi.registerCommand("advisor", {
@@ -171,7 +191,18 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 		handler: async (args, ctx) => {
 			const action = args.trim();
 			if (action === "status") {
-				ctx.ui.notify(`Advisor is ${advisorEnabled(ctx.sessionManager.getBranch()) ? "on" : "off"} on this branch.`, "info");
+				const record = lastReview;
+				const lines = [
+					`Advisor is ${advisorEnabled(ctx.sessionManager.getBranch()) ? "on" : "off"} on this branch.`,
+					...(record ? [
+						`Last review: ${record.time} · model ${record.model ?? "none"}`,
+						...record.failedRoutes.map((route) => `Failed route ${route.model}: ${route.errorCode ?? "error"}`),
+						`Verdict ${record.verdict} · duration ${Math.round(record.durationMs)} ms${record.costUsd !== undefined ? ` · cost USD ${record.costUsd}` : ""}`,
+					] : ["No advisor review in this session."]),
+					`Malformed responses in this session: ${malformedCount}`,
+				];
+				if (ctx.hasUI) ctx.ui.notify(lines.join("\n"), "info");
+				else process.stdout.write(`${lines.join("\n")}\n`);
 				return;
 			}
 			if (action !== "on" && action !== "off") {
@@ -182,6 +213,13 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 			pi.appendEntry(ADVISOR_ENTRY, { enabled: action === "on" });
 			ctx.ui.notify(`Advisor is ${action} on this branch.`, "info");
 		},
+	});
+
+	pi.on("session_start", (_event, ctx) => {
+		cancel(ctx);
+		lastReview = undefined;
+		malformedCount = 0;
+		runLeaf = undefined;
 	});
 
 	// Fires once for each run that a user message or an idle triggerTurn message starts, before the message is appended.
@@ -210,18 +248,29 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 		const resolved = routes(ctx);
 		if (!resolved) return;
 
+		const record: ReviewRecord = {
+			time: new Date().toISOString(), failedRoutes: [], durationMs: 0, verdict: "reviewing",
+		};
+		lastReview = record;
+		const started = performance.now();
 		const leaf = ctx.sessionManager.getLeafId();
 		const controller = new AbortController();
 		const timeout = AbortSignal.timeout(REVIEW_TIMEOUT_MS);
 		active = controller;
 		ctx.ui.setStatus(ADVISOR_ENTRY, "Advisor reviewing…");
 		// Not awaited: Pi waits for agent_settled handlers before the session counts as idle.
-		void review(ctx, resolved, input, AbortSignal.any([controller.signal, timeout])).then((reply) => {
-			if (active !== controller || !ctx.isIdle() || ctx.sessionManager.getLeafId() !== leaf) return;
+		void review(ctx, resolved, input, AbortSignal.any([controller.signal, timeout]), record).then((reply) => {
+			record.durationMs = performance.now() - started;
+			if (active !== controller || !ctx.isIdle() || ctx.sessionManager.getLeafId() !== leaf) {
+				record.verdict = controller.signal.aborted ? "aborted" : "discarded";
+				return;
+			}
 			active = undefined;
 			ctx.ui.setStatus(ADVISOR_ENTRY, undefined);
-			deliver(ctx, reply, branch);
+			record.verdict = deliver(ctx, reply, branch);
 		}, (error) => {
+			record.durationMs = performance.now() - started;
+			record.verdict = controller.signal.aborted || timeout.aborted ? "aborted" : "failed";
 			if (active !== controller) return;
 			ctx.ui.notify(timeout.aborted
 				? `Advisor review timed out after ${REVIEW_TIMEOUT_MS / 1000} seconds.`

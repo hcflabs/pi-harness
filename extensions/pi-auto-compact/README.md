@@ -36,9 +36,26 @@ Run `/auto-compact` without arguments and enter a threshold. Pi confirms `Auto-c
 | Surface | Type | Purpose |
 | --- | --- | --- |
 | `/auto-compact` | command | For users: set the context-use threshold interactively. |
+| `/auto-compact status` | command | For users: inspect the last auto-compaction operation in this session. |
 | `pi-auto-compact/autoCompact` | task | For Task Models users: configure compaction model routes. |
 
 Read trim has no separate switch. Disable or remove this extension to opt out.
+
+### Status
+
+Run `/auto-compact status` to inspect the last auto-compaction operation. Without a record, Pi shows `No auto-compact attempt in this session.`
+
+The record contains:
+
+- Start time and trigger.
+- Each executed route's model, outcome, duration in milliseconds, and safe error code when it fails.
+- Total duration, final outcome, and final error code when the operation fails.
+- The reason for the current session model fallback, including `config-missing`.
+- The reason retries stopped.
+
+The command does not run compaction or change config. It shows no message, summary, or error message text. Without UI, stdout contains the status.
+
+Pi already shows a compaction loader during compaction. This extension adds no running footer status.
 
 ## Flow
 
@@ -67,10 +84,16 @@ Only `/auto-compact` writes config. It rereads and reports problems when opened.
 
 Compaction changes only future context for the active session. Raw history, exports, UI display, and historical usage stay unchanged. Providers do not refund earlier tokens. Older-prefix edits can decrease provider cache reuse.
 
+The last record stays only in memory. Session start clears it. Branch navigation does not restore an earlier record.
+
 This does not erase secrets.
 
 ## Limits and recovery
 
 If fresh input cannot fit safely, Pi reports the limit without discarding the request. Shorten the input or run `/compact`.
 
-If all summary requests fail, no checkpoint is saved. Check model routes and authentication, then run `/compact` to try again.
+If all summary requests fail, no checkpoint is saved. Check `/auto-compact status` for the error code and retry limit.
+
+A failed boundary blocks automatic retries at that same boundary. The next boundary can retry. Native emergency compaction can retry on the next request.
+
+Check model routes and authentication, then run `/compact` to try again. Missing shared config selects the current session model without a notice each turn.

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { lock } from "proper-lockfile";
 import { initTheme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import {
 	availableTaskModels,
 	executeTaskRoutes,
@@ -16,6 +17,7 @@ import {
 	resolveTaskModelRoute,
 	taskThinkingLevels,
 	type ModelTask,
+	type TaskRouteAttempt,
 } from "@hcflabs/pi-task-models";
 import registerTaskModelsExtension from "../extensions/task-models.ts";
 
@@ -196,6 +198,149 @@ test("consumers report task-model config issues at launch and after a lazy read,
 		first(ctx as never);
 		second(ctx as never);
 		assert.deepEqual(notices.slice(1), [[`pi-task-models config issues (${file}): tasks["pi-example/review"]: must be one of fast, balanced, frontier, fav; defaults replace invalid settings.`, "warning"]]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("/task-models status resolves each slot with the current scope and config", async () => {
+	const dir = tempDir();
+	try {
+		const { pi, handler } = controlPlane(eventBus(), dir);
+		registerModelTask(pi as never, EXAMPLE_TASK);
+		registerModelTask(pi as never, { ...EXAMPLE_TASK, id: "pi-example/other", label: "Other", defaultProfile: "fav" });
+		const primary = { provider: "openai-codex-2", id: "primary", input: ["text"], reasoning: true };
+		const fallback = { provider: "test", id: "fallback", input: ["text"], reasoning: false };
+		mkdirSync(join(dir, "config", "pi-task-models"), { recursive: true });
+		const profiles = {
+			fast: {
+				primary: { model: "openai-codex/primary", thinkingLevel: "low" },
+				fallback: { model: "test/fallback", thinkingLevel: "off" },
+			},
+			fav: { primary: { model: "test/fallback", thinkingLevel: "off" } },
+		};
+		writeFileSync(configFile(dir), JSON.stringify({ profiles }));
+		const notices: Array<[string, string]> = [];
+		const colors: string[] = [];
+		const ctx = {
+			hasUI: true,
+			model: primary,
+			scopedModels: [] as any[],
+			modelRegistry: { getAvailable: () => [primary, fallback] },
+			ui: {
+				theme: { fg(color: string, text: string) { colors.push(color); return text; } },
+				notify(message: string, level: string) { notices.push([message, level]); },
+				select: async () => assert.fail("status must not open a menu"),
+				setStatus: () => assert.fail("task models has no persistent status"),
+			},
+		};
+		const columns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+		Object.defineProperty(process.stdout, "columns", { configurable: true, value: 300 });
+		try {
+			await handler("status", ctx);
+			assert.deepEqual(notices, [
+				["Other (pi-example/other) · primary test/fallback (off) · fallback none", "info"],
+				["Example review (pi-example/review) · primary openai-codex-2/primary (low) · fallback test/fallback (off)", "info"],
+			]);
+			assert.deepEqual(colors, ["accent", "accent"]);
+
+			ctx.scopedModels = [{ model: primary, thinkingLevel: "high" }, { model: fallback, thinkingLevel: "off" }];
+			notices.length = 0;
+			await handler("status", ctx);
+			assert.deepEqual(notices[1], [
+				"Example review (pi-example/review) · primary openai-codex/primary (low) · fallback test/fallback (off) · primary slot unavailable",
+				"warning",
+			]);
+
+			ctx.scopedModels = [{ model: primary, thinkingLevel: "low" }];
+			notices.length = 0;
+			await handler("status", ctx);
+			assert.match(notices[0]![0], /fallback none.*primary slot unavailable.*no-route: Task pi-example\/other profile fav has no available route/);
+			assert.deepEqual(notices[1], [
+				"Example review (pi-example/review) · primary openai-codex-2/primary (low) · fallback test/fallback (off) · fallback slot unavailable",
+				"warning",
+			]);
+
+			writeFileSync(configFile(dir), JSON.stringify({ profiles, tasks: { [EXAMPLE_TASK.id]: "fav" } }));
+			ctx.scopedModels = [];
+			notices.length = 0;
+			await handler("status", ctx);
+			assert.match(notices[1]![0], /primary test\/fallback \(off\).*fallback none$/);
+		} finally {
+			if (columns) Object.defineProperty(process.stdout, "columns", columns);
+			else Reflect.deleteProperty(process.stdout, "columns");
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("/task-models status reports route errors and config issues on every read without UI", async () => {
+	const dir = tempDir();
+	try {
+		const { pi, handler } = controlPlane(eventBus(), dir);
+		registerModelTask(pi as never, EXAMPLE_TASK);
+		const ctx = { hasUI: false, ui: new Proxy({}, { get() { assert.fail("status must not use UI without hasUI"); } }) };
+		let text = "";
+		const write = process.stdout.write;
+		process.stdout.write = ((chunk: string) => { text += chunk; return true; }) as typeof write;
+		try {
+			await handler("status", ctx);
+			assert.match(text, /primary none · fallback none · config-missing: Task model config is missing/);
+			assert.equal(existsSync(configFile(dir)), false);
+
+			mkdirSync(join(dir, "config", "pi-task-models"), { recursive: true });
+			for (const [contents, code, issue] of [
+				["{ not json", "config-disabled", /Config .*config\.json: invalid JSON/],
+				['{"profiles":{"fast":null}}', "profile-missing", /Config .*config\.json: profiles\.fast: must be an object/],
+				["{}", "profile-missing", undefined],
+			] as const) {
+				writeFileSync(configFile(dir), contents);
+				for (const _repeat of [1, 2]) {
+					text = "";
+					await handler("status", ctx);
+					assert.match(text, new RegExp(` · ${code}: `));
+					if (issue) assert.match(text, issue);
+					assert.equal(readFileSync(configFile(dir), "utf8"), contents);
+				}
+			}
+			writeFileSync(join(dir, "config", "pi-task-models", "presets.json"), "{ not json");
+			text = "";
+			await handler("status", ctx);
+			assert.match(text, /Config .*presets\.json: invalid JSON/);
+		} finally {
+			process.stdout.write = write;
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("/task-models status uses one width-safe UI line and reports no active tasks", async () => {
+	const dir = tempDir();
+	try {
+		const { pi, handler } = controlPlane(eventBus(), dir);
+		const notices: string[] = [];
+		const ctx = { hasUI: true, ui: {
+			theme: { fg: (_color: string, text: string) => text },
+			notify(message: string) { notices.push(message); },
+		} };
+		await handler("status", ctx);
+		assert.deepEqual(notices, ["No Model Tasks are active."]);
+		registerModelTask(pi as never, { ...EXAMPLE_TASK, label: "界".repeat(50) });
+		const columns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+		Object.defineProperty(process.stdout, "columns", { configurable: true, value: 40 });
+		try {
+			notices.length = 0;
+			await handler("status", ctx);
+			assert.equal(notices.length, 1);
+			assert.doesNotMatch(notices[0]!, /[\r\n]/);
+			assert.ok(visibleWidth(notices[0]!) <= 38);
+			assert.match(notices[0]!, /\.\.\./);
+		} finally {
+			if (columns) Object.defineProperty(process.stdout, "columns", columns);
+			else Reflect.deleteProperty(process.stdout, "columns");
+		}
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
@@ -734,8 +879,9 @@ test("returns the first successful route", async () => {
 	assert.deepEqual(attempts, ["primary"]);
 });
 
-test("executes approved fallback routes serially and returns first success", async () => {
-	const primaryFailure = new Error("primary failed");
+test("executes approved fallback routes serially and reports each attempt", async () => {
+	const primaryFailure = Object.assign(new Error("primary failed"), { taskRouteCode: "no-route", code: "unused-code" });
+	const records: TaskRouteAttempt[] = [];
 	const attempts: string[] = [];
 	let releasePrimary = () => {};
 	const primaryPending = new Promise<void>((resolve) => { releasePrimary = () => resolve(); });
@@ -749,29 +895,222 @@ test("executes approved fallback routes serially and returns first success", asy
 			}
 			return route.model.id;
 		},
-		{ shouldFallback: (error) => error === primaryFailure },
+		{ shouldFallback: (error) => error === primaryFailure, onAttempt: (record) => { records.push(record); } },
 	);
 	assert.deepEqual(attempts, ["primary"]);
+	assert.equal(records.length, 0);
 	releasePrimary();
 	assert.equal(await result, "fallback");
 	assert.deepEqual(attempts, ["primary", "fallback"]);
+	assert.deepEqual(records.map(({ durationMs, ...record }) => record), [
+		{ routeIndex: 0, model: "test/primary", outcome: "failed", errorCode: "no-route" },
+		{ routeIndex: 1, model: "test/fallback", outcome: "succeeded" },
+	]);
+	for (const record of records) {
+		assert.ok(Object.isFrozen(record));
+		assert.ok(Number.isFinite(record.durationMs) && record.durationMs >= 0);
+		assert.throws(() => { (record as any).outcome = "changed"; }, TypeError);
+	}
 });
 
-test("rethrows the exact final route error", async () => {
+test("rethrows the exact final route error and reports it", async () => {
 	const firstFailure = new Error("first failed");
 	const finalFailure = new Error("final failed");
+	const records: TaskRouteAttempt[] = [];
 	let attempt = 0;
 	let fallbackChecks = 0;
 	await assert.rejects(
 		executeTaskRoutes(
 			EXECUTION_ROUTES,
 			async () => { throw [firstFailure, finalFailure][attempt++]; },
-			{ shouldFallback: () => { fallbackChecks++; return true; } },
+			{ shouldFallback: () => { fallbackChecks++; return true; }, onAttempt: (record) => { records.push(record); } },
 		),
 		(error) => error === finalFailure,
 	);
 	assert.equal(attempt, 2);
 	assert.equal(fallbackChecks, 1);
+	assert.deepEqual(records.map(({ errorCode, outcome, routeIndex }) => ({ errorCode, outcome, routeIndex })), [
+		{ errorCode: "Error", outcome: "failed", routeIndex: 0 },
+		{ errorCode: "Error", outcome: "failed", routeIndex: 1 },
+	]);
+});
+
+test("reports bounded error codes without message or result text", async () => {
+	for (const [error, code] of [
+		[Object.assign(new Error("private message"), { taskRouteCode: "no-route", code: "E_TEST", status: 503 }), "no-route"],
+		[{ code: "E_TEST", status: 503, name: "CustomError" }, "E_TEST"],
+		[{ code: 503, status: 429, name: "CustomError" }, "http-429"],
+		[{ status: 503, name: "CustomError" }, "http-503"],
+		[{ status: Number.NaN, name: "CustomError" }, "CustomError"],
+		[{ status: Number.POSITIVE_INFINITY }, "error"],
+		[{ status: "503", code: 503 }, "error"],
+		[{ name: "CustomError", message: "private message", output: "private output" }, "CustomError"],
+		[{ name: "Custom_Error2" }, "Custom_Error2"],
+		[{ name: "secret prompt" }, "error"],
+		[{ name: "Error\nsecret" }, "error"],
+		[{ name: "2Error" }, "error"],
+		[{ name: "E".repeat(64) }, "E".repeat(64)],
+		[{ name: "E".repeat(65) }, "error"],
+		[{ code: `E_TEST\r\n${"x".repeat(100)}` }, `E_TEST ${"x".repeat(57)}`],
+		[{ taskRouteCode: "x".repeat(100) }, "x".repeat(64)],
+		[{ code: "", name: "CustomError" }, "CustomError"],
+		["text failure\nnext", "error"],
+	] as const) {
+		const records: TaskRouteAttempt[] = [];
+		await assert.rejects(executeTaskRoutes(EXECUTION_ROUTES.slice(0, 1), async () => { throw error; }, {
+			shouldFallback: () => assert.fail("the last route must not check fallback"),
+			onAttempt(record) { records.push(record); },
+		}), (caught) => caught === error);
+		assert.equal(records.length, 1);
+		assert.deepEqual(Object.keys(records[0]!).sort(), ["durationMs", "errorCode", "model", "outcome", "routeIndex"]);
+		assert.equal(records[0]!.errorCode, code);
+		assert.ok(records[0]!.errorCode!.length <= 64);
+		assert.doesNotMatch(JSON.stringify(records), /private message|private output|secret prompt|text failure/);
+	}
+	const records: TaskRouteAttempt[] = [];
+	const result = { output: "private output" };
+	assert.equal(await executeTaskRoutes(EXECUTION_ROUTES, async () => result, {
+		shouldFallback: () => true, onAttempt(record) { records.push(record); },
+	}), result);
+	assert.deepEqual(Object.keys(records[0]!).sort(), ["durationMs", "model", "outcome", "routeIndex"]);
+	assert.equal(records.length, 1);
+});
+
+test("never copies error message text or thrown strings into route records", async () => {
+	const records: TaskRouteAttempt[] = [];
+	const failures = [new Error("secret prompt"), "secret prompt"];
+	let calls = 0;
+	await assert.rejects(executeTaskRoutes(EXECUTION_ROUTES, async () => { throw failures[calls++]; }, {
+		shouldFallback: () => true,
+		onAttempt(record) { records.push(record); },
+	}), (error) => error === failures[1]);
+	assert.equal(records.length, 2);
+	assert.deepEqual(records.map(({ errorCode }) => errorCode), ["Error", "error"]);
+	for (const record of records) {
+		assert.ok(Object.isFrozen(record));
+		assert.equal(Object.hasOwn(record, "error"), false);
+		assert.doesNotMatch(JSON.stringify(record), /secret prompt/);
+	}
+});
+
+test("preserves route errors and fallback when an Error name getter throws, with or without an observer", async () => {
+	const failure = new Error("private route failure");
+	Object.defineProperty(failure, "name", { get() { throw new Error("private getter failure"); } });
+	for (const observe of [false, true]) {
+		for (const [routes, fallback, succeeds] of [
+			[EXECUTION_ROUTES, true, true],
+			[EXECUTION_ROUTES, false, false],
+			[EXECUTION_ROUTES, true, false],
+			[EXECUTION_ROUTES.slice(0, 1), true, false],
+		] as const) {
+			const records: TaskRouteAttempt[] = [];
+			const attempts: string[] = [];
+			let fallbackChecks = 0;
+			const result = executeTaskRoutes(routes, async (route) => {
+				attempts.push(route.model.id);
+				if (succeeds && route.model.id === "fallback") return "fallback";
+				throw failure;
+			}, {
+				shouldFallback(error) {
+					assert.equal(error, failure);
+					fallbackChecks++;
+					return fallback;
+				},
+				onAttempt: observe ? (record) => { records.push(record); } : undefined,
+			});
+			if (succeeds) assert.equal(await result, "fallback");
+			else await assert.rejects(result, (error) => error === failure);
+			assert.deepEqual(attempts, fallback && routes.length > 1 ? ["primary", "fallback"] : ["primary"]);
+			assert.equal(fallbackChecks, routes.length > 1 ? 1 : 0);
+			assert.deepEqual(records.map(({ durationMs, ...record }) => record), observe ? attempts.map((model, routeIndex) => ({
+				routeIndex,
+				model: `test/${model}`,
+				outcome: succeeds && routeIndex === 1 ? "succeeded" : "failed",
+				...(succeeds && routeIndex === 1 ? {} : { errorCode: "error" }),
+			})) : []);
+			assert.doesNotMatch(JSON.stringify(records), /private/);
+		}
+	}
+});
+
+test("reports a generic error code when error metadata getters throw", async () => {
+	for (const field of ["taskRouteCode", "code", "status", "name"]) {
+		const failure = Object.defineProperty({}, field, { get() { throw new Error("private getter failure"); } });
+		const records: TaskRouteAttempt[] = [];
+		await assert.rejects(executeTaskRoutes(EXECUTION_ROUTES.slice(0, 1), async () => { throw failure; }, {
+			shouldFallback: () => assert.fail("the last route must not check fallback"),
+			onAttempt(record) { records.push(record); },
+		}), (error) => error === failure);
+		assert.equal(records.length, 1);
+		assert.equal(records[0]!.outcome, "failed");
+		assert.equal(records[0]!.errorCode, "error");
+		assert.ok(Object.isFrozen(records[0]));
+		assert.doesNotMatch(JSON.stringify(records), /private/);
+	}
+});
+
+test("ignores synchronous and asynchronous observer failures without changing route results", async () => {
+	for (const onAttempt of [
+		() => { throw new Error("observer failed"); },
+		async () => { throw new Error("observer failed"); },
+	]) {
+		let calls = 0;
+		assert.equal(await executeTaskRoutes(EXECUTION_ROUTES, async () => {
+			if (calls++ === 0) throw new Error("primary failed");
+			return "fallback";
+		}, { shouldFallback: () => true, onAttempt }), "fallback");
+		const failure = new Error("route failed");
+		for (const routes of [EXECUTION_ROUTES, EXECUTION_ROUTES.slice(0, 1)]) {
+			await assert.rejects(executeTaskRoutes(routes, async () => { throw failure; }, {
+				shouldFallback: () => false, onAttempt,
+			}), (error) => error === failure);
+		}
+	}
+});
+
+test("reports aborted attempts but not routes cancelled before execution", async () => {
+	const records: TaskRouteAttempt[] = [];
+	const before = new AbortController();
+	before.abort();
+	await assert.rejects(executeTaskRoutes(EXECUTION_ROUTES, async () => assert.fail("must not execute"), {
+		signal: before.signal, shouldFallback: () => true, onAttempt(record) { records.push(record); },
+	}), { name: "AbortError" });
+	assert.equal(records.length, 0);
+	for (const routes of [EXECUTION_ROUTES, EXECUTION_ROUTES.slice(1)]) {
+		const controller = new AbortController();
+		const failure = new Error("attempt cancelled");
+		records.length = 0;
+		await assert.rejects(executeTaskRoutes(routes, async () => {
+			controller.abort();
+			throw failure;
+		}, {
+			signal: controller.signal,
+			shouldFallback: () => assert.fail("cancellation must not check fallback"),
+			onAttempt(record) { records.push(record); },
+		}), (error) => error === failure);
+		assert.equal(records.length, 1);
+		assert.equal(records[0]!.outcome, "aborted");
+		assert.equal(records[0]!.errorCode, "Error");
+		assert.equal(records[0]!.model, `test/${routes[0].model.id}`);
+	}
+});
+
+test("reports AbortError without a signal and preserves fallback policy errors", async () => {
+	const records: TaskRouteAttempt[] = [];
+	const abort = Object.assign(new Error("route cancelled"), { name: "AbortError" });
+	await assert.rejects(executeTaskRoutes(EXECUTION_ROUTES.slice(0, 1), async () => { throw abort; }, {
+		shouldFallback: () => false, onAttempt(record) { records.push(record); },
+	}), (error) => error === abort);
+	assert.equal(records[0]!.outcome, "aborted");
+	assert.equal(records[0]!.errorCode, "AbortError");
+
+	const policyError = new Error("fallback policy failed");
+	records.length = 0;
+	await assert.rejects(executeTaskRoutes(EXECUTION_ROUTES, async () => { throw new Error("primary failed"); }, {
+		shouldFallback: () => { throw policyError; }, onAttempt(record) { records.push(record); },
+	}), (error) => error === policyError);
+	assert.equal(records.length, 1);
+	assert.equal(records[0]!.errorCode, "Error");
 });
 
 test("rejects an empty route list", async () => {
@@ -780,7 +1119,7 @@ test("rejects an empty route list", async () => {
 		executeTaskRoutes([], async () => {
 			attempted = true;
 			return undefined;
-		}, { shouldFallback: () => true }),
+		}, { shouldFallback: () => true, onAttempt: () => assert.fail("an empty route list has no attempts") }),
 		/Task route list must not be empty/,
 	);
 	assert.equal(attempted, false);
