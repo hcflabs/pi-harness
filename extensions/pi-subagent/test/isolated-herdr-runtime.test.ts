@@ -918,6 +918,163 @@ test("allocation uses token-bound non-focused resources, a mode-0600 lease, and 
 	script.done();
 });
 
+test("fresh agent allocation waits for shell startup before Role launch acquisition", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const delays: number[] = [];
+	const operation = context();
+	const host = runtime(fixture, script, undefined, { delay: async (milliseconds, signal) => {
+		assert.equal(signal, operation.signal);
+		delays.push(milliseconds);
+	} });
+	const { attempt, leasePath } = await fullAttempt(fixture, host, script);
+	const intent = attempt.allocations.at(-1) as AgentAllocationIntent;
+	intent.status = "allocating";
+	await privateLease(leasePath);
+	script.push(
+		lsof(leasePath),
+		...startablePaneSteps(fixture, { foreground_processes: [
+			{ pid: 501, name: "zsh", cwd: fixture.worktree },
+			{ pid: 502, name: "git", cwd: fixture.worktree },
+		] }),
+		...startablePaneSteps(fixture, {
+			foreground_process_group_id: 777,
+			foreground_processes: [{ pid: 777, name: "starship", cwd: fixture.worktree }],
+		}).slice(1),
+		...startablePaneSteps(fixture).slice(1),
+		...shellPromptSteps(),
+		{ command: "herdr", args: (args) => {
+			assert.deepEqual(args.slice(0, 3), ["agent", "start", AGENT_NAME]);
+		}, result: success({ type: "agent_started", agent: agentInfo("idle", true, { cwd: fixture.worktree }) }) },
+	);
+	let acquisitions = 0;
+	assert.deepEqual(await host.allocateHost({ requestId: REQUEST_ID, intent, task, attempt,
+		acquireLaunch: async () => {
+			assert.deepEqual(delays, [100, 100]);
+			assert.deepEqual(script.calls.slice(-4).map(({ args }) => args), [
+				["pane", "get", WORKER_PANE_ID],
+				...Array.from({ length: 3 }, () => ["pane", "process-info", "--pane", WORKER_PANE_ID]),
+			]);
+			acquisitions += 1;
+			return transientLaunch();
+		},
+	}, operation), { kind: "agent", outcome: "owned" });
+	assert.equal(acquisitions, 1);
+	assert.deepEqual(delays, [100, 100]);
+	assert.equal(script.calls.filter(({ args }) => args[0] === "pane" && args[1] === "get").length, 1);
+	script.done();
+});
+
+test("fresh agent allocation bounds shell startup polling and reports the last process state", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const delays: number[] = [];
+	const host = runtime(fixture, script, undefined, { delay: async (milliseconds) => { delays.push(milliseconds); } });
+	const { attempt, leasePath } = await fullAttempt(fixture, host, script);
+	const intent = attempt.allocations.at(-1) as AgentAllocationIntent;
+	intent.status = "allocating";
+	await privateLease(leasePath);
+	const busy = { foreground_processes: [
+		{ pid: 501, name: "zsh", cwd: fixture.worktree },
+		{ pid: 502, name: `git-${"x".repeat(2_000)}`, cwd: fixture.worktree },
+	] };
+	script.push(
+		lsof(leasePath),
+		...startablePaneSteps(fixture, busy).slice(0, 1),
+		...Array.from({ length: 100 }, () => startablePaneSteps(fixture, busy)[1]!),
+	);
+	let acquisitions = 0;
+	await assert.rejects(host.allocateHost({ requestId: REQUEST_ID, intent, task, attempt,
+		acquireLaunch: async () => { acquisitions += 1; return transientLaunch(); },
+	}, context()), (error: Error) => {
+		assert.match(error.message, /not an idle foreground shell/);
+		assert.match(error.message, /shell_pid=501, foreground_process_group_id=501, foreground=\[501:zsh, 502:git-/);
+		assert.ok(error.message.length <= 1_100);
+		return true;
+	});
+	assert.equal(acquisitions, 0);
+	assert.equal(script.calls.some(({ args }) => args[0] === "agent" && args[1] === "start"), false);
+	assert.equal(script.calls.filter(({ args }) => args[0] === "pane" && args[1] === "process-info").length, 100);
+	assert.deepEqual(delays, Array.from({ length: 99 }, () => 100));
+	script.done();
+});
+
+test("fresh agent allocation stops shell startup polling when its signal aborts", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const controller = new AbortController();
+	const delays: number[] = [];
+	const host = runtime(fixture, script, undefined, { delay: async (milliseconds, signal) => {
+		assert.equal(signal, controller.signal);
+		delays.push(milliseconds);
+		controller.abort(new Error("Shell startup wait aborted."));
+		signal.throwIfAborted();
+	} });
+	const { attempt, leasePath } = await fullAttempt(fixture, host, script);
+	const intent = attempt.allocations.at(-1) as AgentAllocationIntent;
+	intent.status = "allocating";
+	await privateLease(leasePath);
+	script.push(lsof(leasePath), ...startablePaneSteps(fixture, {
+		foreground_process_group_id: 777,
+		foreground_processes: [{ pid: 777, name: "starship", cwd: fixture.worktree }],
+	}));
+	let acquisitions = 0;
+	await assert.rejects(host.allocateHost({ requestId: REQUEST_ID, intent, task, attempt,
+		acquireLaunch: async () => { acquisitions += 1; return transientLaunch(); },
+	}, { ...context(), signal: controller.signal }), /Shell startup wait aborted/);
+	assert.equal(acquisitions, 0);
+	assert.deepEqual(delays, [100]);
+	assert.equal(script.calls.filter(({ args }) => args[0] === "pane" && args[1] === "process-info").length, 1);
+	assert.equal(script.calls.some(({ args }) => args[0] === "agent" && args[1] === "start"), false);
+	script.done();
+});
+
+test("fresh agent allocation rejects a pane identity mismatch without shell startup polling", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const delays: number[] = [];
+	const host = runtime(fixture, script, undefined, { delay: async (milliseconds) => { delays.push(milliseconds); } });
+	const { attempt, leasePath } = await fullAttempt(fixture, host, script);
+	const intent = attempt.allocations.at(-1) as AgentAllocationIntent;
+	intent.status = "allocating";
+	await privateLease(leasePath);
+	script.push(lsof(leasePath), ...startablePaneSteps(fixture, {}, { pane_id: "pane-decoy" }).slice(0, 1));
+	let acquisitions = 0;
+	await assert.rejects(host.allocateHost({ requestId: REQUEST_ID, intent, task, attempt,
+		acquireLaunch: async () => { acquisitions += 1; return transientLaunch(); },
+	}, context()), /not empty and startable/);
+	assert.equal(acquisitions, 0);
+	assert.deepEqual(delays, []);
+	assert.equal(script.calls.filter(({ args }) => args[0] === "pane" && args[1] === "get").length, 1);
+	assert.equal(script.calls.some(({ args }) => args[0] === "pane" && args[1] === "process-info"), false);
+	assert.equal(script.calls.some(({ args }) => args[0] === "agent" && args[1] === "start"), false);
+	script.done();
+});
+
+test("agent allocation recovery rejects shell startup processes without polling", async (t) => {
+	const fixture = await paths(t);
+	const script = new ScriptedProcess();
+	const delays: number[] = [];
+	const host = runtime(fixture, script, undefined, { delay: async (milliseconds) => { delays.push(milliseconds); } });
+	const { attempt, leasePath } = await fullAttempt(fixture, host, script);
+	const intent = attempt.allocations.at(-1) as AgentAllocationIntent;
+	intent.status = "unknown";
+	await privateLease(leasePath);
+	script.push(
+		{ command: "herdr", args: ["agent", "list"], result: success({ type: "agent_list", agents: [] }) },
+		lsof(leasePath),
+		...startablePaneSteps(fixture, { foreground_processes: [
+			{ pid: 501, name: "zsh", cwd: fixture.worktree },
+			{ pid: 502, name: "git", cwd: fixture.worktree },
+		] }),
+	);
+	const result = await host.reconcileHostAllocation({ requestId: REQUEST_ID, intent, task, attempt }, context());
+	assert.equal(result.outcome, "possible");
+	assert.equal(script.calls.filter(({ args }) => args[0] === "pane" && args[1] === "process-info").length, 1);
+	assert.deepEqual(delays, []);
+	script.done();
+});
+
 test("agent allocation accepts the task's explicit Role and rejects launch mismatches", async (t) => {
 	const roleTask: TaskRequest = { ...task, role: "release manager" };
 	const cases: Array<{
@@ -2445,6 +2602,79 @@ test("termination reconciliation proves exact active or absent worker state", as
 			script.done();
 		});
 	}
+});
+
+test("settled worker inspection requires a stop Final turn on the exact latest prompt", async (t) => {
+	const userEntry = (id: string, parentId: string | null, text: string) => JSON.stringify({
+		type: "message", id, parentId, message: { role: "user", content: [{ type: "text", text }] },
+	});
+	const assistantEntry = (id: string, parentId: string, stopReason: string) => JSON.stringify({
+		type: "message", id, parentId, message: { role: "assistant", stopReason, content: [{ type: "text", text: "Committed." }] },
+	});
+	const latest = `Correct the task.\n\nTurn identity: ${TOKEN}:2`;
+	const cases: Array<{
+		name: string;
+		status?: string;
+		agent?: Record<string, unknown>;
+		session?: string[];
+		privateLease?: boolean;
+		expected: "settled" | "active" | "unknown";
+		failure?: RegExp;
+	}> = [
+		{ name: "stop turn with the matching identity", expected: "settled",
+			session: [userEntry("user-one", null, latest), assistantEntry("answer-one", "user-one", "stop")] },
+		{ name: "later user turn", expected: "unknown", failure: /unexpected user turn/,
+			session: [userEntry("user-one", null, latest), assistantEntry("answer-one", "user-one", "stop"),
+				userEntry("user-two", "answer-one", "Another instruction.")] },
+		{ name: "confirmed error Final turn", expected: "unknown", failure: /stop reason "error"/,
+			session: [userEntry("user-one", null, latest), assistantEntry("answer-one", "user-one", "error")] },
+		{ name: "stop turn of an earlier prompt only", expected: "active", failure: /no entry for the latest worker prompt/,
+			session: [userEntry("user-one", null, `Do the task.\n\nTurn identity: ${TOKEN}:1`), assistantEntry("answer-one", "user-one", "stop")] },
+		{ name: "latest prompt without a Final turn", expected: "active", failure: /no Final turn yet/,
+			session: [userEntry("user-one", null, latest)] },
+		{ name: "working agent", status: "working", expected: "active", failure: /not settled: working/ },
+		{ name: "pane mismatch", agent: { pane_id: "pane-other" }, expected: "unknown", failure: /does not match the exact saved worker/ },
+		{ name: "non-private lease", privateLease: false, expected: "unknown" },
+	];
+	for (const item of cases) await t.test(item.name, async (t) => {
+		const fixture = await paths(t);
+		const script = new ScriptedProcess();
+		const host = runtime(fixture, script);
+		const { attempt, leasePath } = await fullAttempt(fixture, host, script);
+		attempt.prompts.push(
+			{ kind: "initial", status: "settled", preCandidate: baseIdentity(), failure: "blocked", at: 1 },
+			{ kind: "correction", status: "settled", preCandidate: baseIdentity(), failure: "blocked", at: 2 },
+		);
+		await privateLease(leasePath);
+		if (item.privateLease === false) await chmod(leasePath, 0o644);
+		if (item.session) await writeFile(`${leasePath}.session.jsonl`, `${item.session.join("\n")}\n`, { mode: 0o600 });
+		if (item.privateLease !== false) {
+			script.push({
+				command: "herdr",
+				args: (args) => assert.deepEqual(args.slice(0, 3), ["agent", "wait", AGENT_NAME]),
+				result: success({ type: "agent_info", agent: agentInfo(item.status ?? "done", true, { cwd: fixture.worktree, ...item.agent }) }),
+			});
+		}
+
+		const result = await host.inspectSettledWorker({ task, attempt, workerId: AGENT_NAME }, context());
+
+		assert.equal(result.outcome, item.expected);
+		if (item.failure) assert.match(result.outcome === "settled" ? "" : result.failure, item.failure);
+		assert.equal(script.calls.filter(({ args }) => args[1] === "prompt").length, 0);
+		script.done();
+	});
+
+	await t.test("another worker ID", async (t) => {
+		const fixture = await paths(t);
+		const script = new ScriptedProcess();
+		const host = runtime(fixture, script);
+		const { attempt, leasePath } = await fullAttempt(fixture, host, script);
+		attempt.prompts.push({ kind: "initial", status: "settled", preCandidate: baseIdentity(), at: 1 });
+		await privateLease(leasePath);
+		const result = await host.inspectSettledWorker({ task, attempt, workerId: "o-other-agent" }, context());
+		assert.equal(result.outcome, "unknown");
+		script.done();
+	});
 });
 
 test("termination quarantines ambiguity, late holders, and survivors without signaling unrelated PIDs", async (t) => {

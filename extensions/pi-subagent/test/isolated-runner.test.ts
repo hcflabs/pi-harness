@@ -115,6 +115,13 @@ class FakeRuntime implements CoordinatorRuntime, HostRuntime, GitRuntime {
 	readonly inspectMainCalls: OperationContext[] = [];
 	readonly inspectMainFailures: Error[] = [];
 	readonly reviewVerdicts: string[] = [];
+	/** Results of inspectSettledWorker. An empty queue gives unknown. */
+	readonly settledWorkerResults: Array<{ outcome: "settled" } | { outcome: "active" | "unknown"; failure: string }> = [];
+	readonly settledWorkerCalls: Array<{ workerId: string; prompts: number }> = [];
+	/** Results of inspectRetainedTask before the saved candidate default. */
+	readonly retainedTaskResults: Array<WorkspaceIdentity | Error> = [];
+	/** The identity after the next task check batch, instead of its candidate. */
+	checkIdentityAfter?: WorkspaceIdentity;
 	private readonly workerBarrierResolvers: Array<() => void> = [];
 	private activeWorkers = 0;
 	private candidateNumber = 0;
@@ -342,6 +349,11 @@ class FakeRuntime implements CoordinatorRuntime, HostRuntime, GitRuntime {
 		return this.terminationReconciliations.shift() ?? { outcome: "active" };
 	}
 
+	async inspectSettledWorker(input: Parameters<NonNullable<HostRuntime["inspectSettledWorker"]>>[0]): Promise<{ outcome: "settled" } | { outcome: "active" | "unknown"; failure: string }> {
+		this.settledWorkerCalls.push({ workerId: input.workerId, prompts: input.attempt.prompts.length });
+		return this.settledWorkerResults.shift() ?? { outcome: "unknown", failure: "No settled worker evidence." };
+	}
+
 	async runChecks(input: Parameters<GitRuntime["runChecks"]>[0], _context: OperationContext): Promise<CheckRunResult> {
 		this.checkCalls.push({ scope: input.scope, ...(input.taskId ? { taskId: input.taskId } : {}) });
 		if (input.scope === "final") {
@@ -360,9 +372,11 @@ class FakeRuntime implements CoordinatorRuntime, HostRuntime, GitRuntime {
 		if (input.scope === "task") {
 			this.changesetCallOrder.push(`check:preliminary:${failed ? "fail" : "pass"}`);
 		}
+		const identityAfter = preliminary && this.checkIdentityAfter ? this.checkIdentityAfter : input.candidate;
+		if (preliminary) this.checkIdentityAfter = undefined;
 		return {
 			results: input.checks.map((check) => ({ ...check, code: failed || (input.scope === "final" && this.failCombinedExit) ? 1 : 0, killed: false, stdout: "", stderr: "" })),
-			identityAfter: { ...input.candidate },
+			identityAfter: { ...identityAfter },
 		};
 	}
 
@@ -389,6 +403,9 @@ class FakeRuntime implements CoordinatorRuntime, HostRuntime, GitRuntime {
 		_context: OperationContext,
 	): Promise<WorkspaceIdentity> {
 		this.retainedTaskInspectionCalls.push(input.task.id);
+		const queued = this.retainedTaskResults.shift();
+		if (queued instanceof Error) throw queued;
+		if (queued) return { ...queued };
 		if (!input.attempt.candidate) throw new Error("missing retained candidate");
 		return { ...input.attempt.candidate };
 	}
@@ -1841,6 +1858,221 @@ test("verification preserves readiness and its candidate together across an inte
 	assert.ok(recording.snapshots.every((state) => state.tasks[0]!.status !== "ready_to_integrate"
 		|| state.integration.candidates.length === 1));
 	for (const snapshot of recording.snapshots) assertParsed(snapshot);
+});
+
+/** Replays the incident: a false finished reading blocks the initial prompt and the correction, so no candidate is saved. */
+async function strandedWorker(t: test.TestContext, id: string, judgment = true) {
+	const fixture = await harness(t);
+	const { root, runtime, runner } = fixture;
+	runtime.workerResults.push(
+		{ outcome: "blocked", diagnostic: "Worker finished without an exact changed clean committed candidate." },
+		{ outcome: "blocked", diagnostic: "Worker finished without an exact changed clean committed candidate." },
+	);
+	const stranded = await runner.execute(request(id, [changesetTask("change", judgment
+		? { judgment: { role: "reviewer", modelClass: "fast", criterion: "The adopted candidate is correct." } }
+		: {})]), root);
+	const task = changesetState(stranded.state, "change");
+	assert.equal(task.status, "needs_attention");
+	assert.equal(stranded.state.correctionCount, 1);
+	assert.equal(task.attempts[0]!.candidate, undefined);
+	assert.deepEqual(runtime.workerCalls.map(({ kind }) => kind), ["initial", "correction"]);
+	return { ...fixture, stranded };
+}
+
+const lateTip = (character = "7") => identity(character, "refs/heads/change");
+
+/** The saved state without the resume timestamp. A refused resume still saves its recovery cleanup. */
+function savedState(state: RunState): RunState {
+	return { ...structuredClone(state), updatedAt: 0 };
+}
+
+test("verify adopts a stranded worker's later candidate without a prompt or a correction", async (t) => {
+	const { root, runtime, runner, stranded } = await strandedWorker(t, "late-adoption");
+	assert.deepEqual(stranded.continuation, { id: "late-adoption", action: "verify", taskId: "change" });
+	const before = runtimeCallCounts(runtime);
+	runtime.settledWorkerResults.push({ outcome: "settled" }, { outcome: "settled" });
+	runtime.retainedTaskResults.push(lateTip());
+
+	const verified = await runner.resume(stranded.continuation!, root);
+	const task = changesetState(verified.state, "change");
+	const attempt = task.attempts[0]!;
+	const delta = runtimeCallDelta(runtime, before);
+
+	assert.equal(task.status, "ready_to_integrate");
+	assert.equal(verified.state.correctionCount, 1);
+	assert.equal(delta.workers, 0);
+	assert.equal(delta.checks, 1);
+	assert.equal(delta.reviews, 1);
+	assert.equal(delta.terminations, 0);
+	assert.deepEqual(runtime.settledWorkerCalls, [
+		{ workerId: "change-agent", prompts: 2 },
+		{ workerId: "change-agent", prompts: 2 },
+	]);
+	assert.deepEqual(attempt.prompts.at(-1)?.candidate, lateTip());
+	assert.deepEqual(attempt.candidate, lateTip());
+	assert.deepEqual(attempt.candidateBase, attempt.waveBase);
+	assert.deepEqual(attempt.readiness?.candidate, lateTip());
+	assert.equal(attempt.preliminaryChecks?.passed, true);
+	assert.equal(attempt.preliminaryReview?.passed, true);
+	assert.equal(verified.state.integration.candidates.length, 1);
+	assert.deepEqual(verified.state.integration.candidates[0]!.tip, lateTip());
+	assertParsed(verified.state);
+	assertParsed((await runner.status("late-adoption", root)).state);
+});
+
+test("status advertises verify for a stranded worker, and retry while its correction is unused", async (t) => {
+	const { root, runner, store } = await strandedWorker(t, "late-continuation");
+	assert.deepEqual((await runner.status("late-continuation", root)).continuation,
+		{ id: "late-continuation", action: "verify", taskId: "change" });
+
+	const handle = await store.load(root, "late-continuation");
+	handle.state.correctionCount = 0;
+	changesetState(handle.state, "change").attempts[0]!.prompts.pop();
+	await handle.save();
+	assert.deepEqual((await runner.status("late-continuation", root)).continuation,
+		{ id: "late-continuation", action: "retry", taskId: "change" });
+});
+
+test("late adoption refusals leave the saved state unchanged", async (t) => {
+	const refusals: Array<{
+		name: string;
+		prepare(runtime: FakeRuntime, state: RunState): void;
+		failure: RegExp;
+		inspectsWorker: boolean;
+	}> = [
+		{ name: "active worker", inspectsWorker: true, failure: /\(active\)/,
+			prepare: (runtime) => { runtime.settledWorkerResults.push({ outcome: "active", failure: "working" }); } },
+		{ name: "unknown worker", inspectsWorker: true, failure: /\(unknown\)/,
+			prepare: (runtime) => { runtime.settledWorkerResults.push({ outcome: "unknown", failure: "later user turn" }); } },
+		{ name: "worker turn starts after the Git read", inspectsWorker: true, failure: /\(active\)/,
+			prepare: (runtime) => {
+				runtime.settledWorkerResults.push({ outcome: "settled" }, { outcome: "active", failure: "working" });
+				runtime.retainedTaskResults.push(lateTip());
+			} },
+		{ name: "head equals the wave base", inspectsWorker: true, failure: /new clean committed candidate/,
+			prepare: (runtime, state) => {
+				runtime.settledWorkerResults.push({ outcome: "settled" });
+				runtime.retainedTaskResults.push({ ...changesetState(state, "change").attempts[0]!.waveBase, branch: "refs/heads/change" });
+			} },
+		{ name: "dirty worktree", inspectsWorker: true, failure: /not clean/,
+			prepare: (runtime) => {
+				runtime.settledWorkerResults.push({ outcome: "settled" });
+				runtime.retainedTaskResults.push(new Error("Git workspace is not clean; no stash, reset, or discard was attempted."));
+			} },
+		{ name: "uncommitted index", inspectsWorker: true, failure: /new clean committed candidate/,
+			prepare: (runtime) => {
+				runtime.settledWorkerResults.push({ outcome: "settled" });
+				runtime.retainedTaskResults.push({ ...lateTip(), index: oid("8") });
+			} },
+		{ name: "worktree off its branch", inspectsWorker: true, failure: /new clean committed candidate/,
+			prepare: (runtime) => {
+				runtime.settledWorkerResults.push({ outcome: "settled" });
+				runtime.retainedTaskResults.push(identity("7", "refs/heads/other"));
+			} },
+		{ name: "recorded termination", inspectsWorker: false, failure: /missing retained candidate/,
+			prepare: (runtime, state) => {
+				runtime.settledWorkerResults.push({ outcome: "settled" });
+				const attempt = changesetState(state, "change").attempts[0]!;
+				attempt.termination = { status: "terminated", workerId: "change-agent", candidate: attempt.prompts[0]!.preCandidate, at: 1_000 };
+			} },
+		{ name: "ambiguous prompt", inspectsWorker: false, failure: /ambiguous/,
+			prepare: (runtime, state) => {
+				runtime.settledWorkerResults.push({ outcome: "settled" });
+				changesetState(state, "change").attempts[0]!.prompts[1]!.status = "ambiguous";
+			} },
+		{ name: "last prompt not sent", inspectsWorker: false, failure: /missing retained candidate/,
+			prepare: (runtime, state) => {
+				runtime.settledWorkerResults.push({ outcome: "settled" });
+				changesetState(state, "change").attempts[0]!.prompts[1]!.status = "not_sent";
+			} },
+	];
+	for (const refusal of refusals) await t.test(refusal.name, async (t) => {
+		const id = `late-refusal-${refusals.indexOf(refusal)}`;
+		const { root, runtime, runner, store } = await strandedWorker(t, id, false);
+		const handle = await store.load(root, id);
+		refusal.prepare(runtime, handle.state);
+		await handle.save();
+		const before = savedState((await store.load(root, id)).state);
+		const counts = runtimeCallCounts(runtime);
+
+		await assert.rejects(runner.resume({ id, action: "verify", taskId: "change" }, root), refusal.failure);
+
+		assert.deepEqual(savedState((await store.load(root, id)).state), before);
+		assert.equal(runtime.settledWorkerCalls.length > 0, refusal.inspectsWorker);
+		const delta = runtimeCallDelta(runtime, counts);
+		assert.equal(delta.workers, 0);
+		assert.equal(delta.checks, 0);
+		assert.equal(delta.reviews, 0);
+	});
+});
+
+test("an adopted candidate that fails its checks needs attention with saved evidence", async (t) => {
+	const { root, runtime, runner, store } = await strandedWorker(t, "late-check-failure");
+	runtime.settledWorkerResults.push({ outcome: "settled" }, { outcome: "settled" });
+	runtime.retainedTaskResults.push(lateTip());
+	runtime.failPreliminaryChecks = 1;
+
+	const result = await runner.resume({ id: "late-check-failure", action: "verify", taskId: "change" }, root);
+	const saved = (await store.load(root, "late-check-failure")).state;
+	const task = changesetState(saved, "change");
+	const attempt = task.attempts[0]!;
+
+	assert.equal(task.status, "needs_attention");
+	assert.match(task.failure ?? "", /check failed on the adopted candidate/);
+	assert.deepEqual(attempt.candidate, lateTip());
+	assert.equal(attempt.preliminaryChecks?.passed, false);
+	assert.deepEqual(attempt.preliminaryChecks?.candidate, lateTip());
+	assert.equal(attempt.readiness, undefined);
+	assert.equal(attempt.preliminaryReview, undefined);
+	assert.deepEqual(saved.integration.candidates, []);
+	assert.equal(saved.correctionCount, 1);
+	assert.equal(result.continuation, undefined);
+	assert.equal(runtime.reviewCalls.length, 0);
+	assert.deepEqual(runtime.workerCalls.map(({ kind }) => kind), ["initial", "correction"]);
+	assertParsed(saved);
+	await assert.rejects(runner.resume({ id: "late-check-failure", action: "verify", taskId: "change" }, root),
+		/lacks exact passing preliminary checks/);
+});
+
+test("an adopted candidate without exact PASS judgment gets no readiness", async (t) => {
+	const { root, runtime, runner, store } = await strandedWorker(t, "late-review-failure");
+	runtime.settledWorkerResults.push({ outcome: "settled" }, { outcome: "settled" });
+	runtime.retainedTaskResults.push(lateTip());
+	runtime.reviewVerdicts.push("Finding: incorrect candidate.");
+
+	await runner.resume({ id: "late-review-failure", action: "verify", taskId: "change" }, root);
+	const saved = (await store.load(root, "late-review-failure")).state;
+	const task = changesetState(saved, "change");
+	const attempt = task.attempts[0]!;
+
+	assert.equal(task.status, "needs_attention");
+	assert.match(task.failure ?? "", /did not return exact PASS on the adopted candidate/);
+	assert.equal(attempt.preliminaryChecks?.passed, true);
+	assert.equal(attempt.preliminaryReview?.passed, false);
+	assert.equal(attempt.readiness, undefined);
+	assert.deepEqual(saved.integration.candidates, []);
+	assertParsed(saved);
+});
+
+test("identity drift during adopted candidate checks gives no readiness", async (t) => {
+	const { root, runtime, runner, store } = await strandedWorker(t, "late-check-drift");
+	runtime.settledWorkerResults.push({ outcome: "settled" }, { outcome: "settled" });
+	runtime.retainedTaskResults.push(lateTip());
+	runtime.checkIdentityAfter = lateTip("8");
+
+	await runner.resume({ id: "late-check-drift", action: "verify", taskId: "change" }, root);
+	const saved = (await store.load(root, "late-check-drift")).state;
+	const task = changesetState(saved, "change");
+	const attempt = task.attempts[0]!;
+
+	assert.equal(task.status, "needs_attention");
+	assert.match(task.failure ?? "", /check changed the adopted candidate/);
+	assert.deepEqual(attempt.preliminaryChecks?.identityAfter, lateTip("8"));
+	assert.equal(attempt.preliminaryChecks?.passed, false);
+	assert.equal(attempt.readiness, undefined);
+	assert.equal(runtime.reviewCalls.length, 0);
+	assert.deepEqual(saved.integration.candidates, []);
+	assertParsed(saved);
 });
 
 test("pre-dispatch text failures preserve both execution attempts and prior diagnostics", async (t) => {
