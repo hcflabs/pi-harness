@@ -57,7 +57,7 @@ A merge request saved for its original Main session but not yet consumed there.
 
 ### Command panes
 
-These terms come from [ADR 022](../../docs/adr/022-multi-repo-targets-and-command-panes.md) (proposed).
+These terms come from [ADR 022](../../docs/adr/022-multi-repo-targets-and-command-panes.md) and [ADR 021](../../docs/adr/021-herdr-workflow-consolidation.md).
 
 **Command job**:
 One executable and argument list that Main starts in a command pane. It has an opaque job ID, a saved exit status, and limits on run time and output.

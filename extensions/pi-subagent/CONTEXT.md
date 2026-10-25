@@ -10,7 +10,7 @@ Pi Subagent delegates bounded work to Role-configured Pi workers. Direct tasks s
 The Pi session and checkout that coordinate delegated work. Main is not the Git branch `main`.
 
 **Repository target**:
-A Git top-level directory inside Main's working directory, selected with a `repo` field. Direct work, isolated state, and promotion use it in place of Main's checkout. See [ADR 022](../../docs/adr/022-multi-repo-targets-and-command-panes.md) (proposed).
+A Git top-level directory inside Main's working directory, selected with a `repo` field. Direct work, isolated state, and promotion use it in place of Main's checkout. See [ADR 019](../../docs/adr/019-pi-subagent-orchestration.md).
 _Avoid_: child checkout, project
 
 **Role**:
@@ -45,7 +45,7 @@ An isolated-graph task whose result is bounded text rather than a changeset. Com
 An isolated-graph task that produces a committed change in its own worker worktree.
 
 **Full suite**:
-The one check that every changeset graph must pass at validation. Admission selects it from config, `package.json`, or `Makefile` and saves it with the request. See [ADR 022](../../docs/adr/022-multi-repo-targets-and-command-panes.md) (proposed).
+The one check that every changeset graph must pass at validation. Admission selects it from config, `package.json`, or `Makefile` and saves it with the request. See [ADR 019](../../docs/adr/019-pi-subagent-orchestration.md).
 _Avoid_: root test script, `pnpm test` suite
 
 ### Checked integration
