@@ -25,6 +25,8 @@ Configure `fast` in `/task-models`.
 
 ## Use
 
+Use `/diagnostics` to read recent config reports and command recovery errors.
+
 Run `/clone-tab`; the original session stays active. Commands and prompts are for humans; tools are for agents.
 
 | Surface | Type | Purpose |

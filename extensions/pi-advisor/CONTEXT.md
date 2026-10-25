@@ -2,6 +2,8 @@
 
 Pi Advisor lets a second model examine what the agent did in a run after the run settles. The second model returns graded Notes, and a Blocker sends one Blocker Follow-up that starts a new turn.
 
+The extension keeps the last Review record and the malformed response count in memory for the session. Status shows metadata, not Review text.
+
 ## Language
 
 **Advisor**:
@@ -35,3 +37,12 @@ _Avoid_: retry, continuation
 **Malformed reply**:
 A Review reply that is not exactly `PASS`, is not only valid Note lines, or is longer than 8,000 characters. Pi Advisor ignores it.
 _Avoid_: parse error
+
+**Review record**:
+Session-only metadata for the last Review. It contains time, the answering route model, failed route codes, duration, known USD cost, and the Verdict.
+It contains no user prompt, Review text, Notes, or error message text.
+_Avoid_: Run record, transcript, log
+
+**Verdict**:
+The result category that the Advisor computes when it delivers a Review. Valid Notes use their strongest Grade. PASS and malformed replies have separate categories.
+_Avoid_: result text

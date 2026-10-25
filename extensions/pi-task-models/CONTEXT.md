@@ -16,6 +16,14 @@ _Avoid_: package-owned model picker, per-extension model catalog
 One model reference and thinking level resolved against Pi's available text models in the current session scope. A scope-pinned thinking level remains binding.
 _Avoid_: free-form provider path, copied model metadata
 
+**Task Route Attempt**:
+A frozen record for one executed Task Route. The optional `onAttempt(record)` observer receives it after execution without changing the result or fallback decision. It contains the route index, resolved model reference, outcome, duration, and an optional bounded error code. It contains no request data, route result, or error message text.
+_Avoid_: prompt log, model output log
+
+**Task model status**:
+A read-only view of active Model Tasks with current config and session scope. The `/task-models status` command shows both configured slots, unavailable slots, route errors, and config issues.
+_Avoid_: persistent status line, run history
+
 **Task assignment**:
 An explicit user choice of Task Profile for a Model Task, in place of its consumer-declared default. An inactive task can retain its assignment.
 

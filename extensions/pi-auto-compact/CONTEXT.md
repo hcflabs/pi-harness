@@ -2,6 +2,8 @@
 
 Pi Auto Compact reduces context pressure while preserving the current task. Normal context maintenance occurs between completed turns; emergency compaction can interrupt and resume work.
 
+The extension keeps the last auto-compaction attempt in memory for status requests. Pi supplies the compaction loader. The extension adds no running footer status.
+
 ## Language
 
 **Auto-compaction**:
@@ -29,3 +31,8 @@ The selected percentage of the context window above which automatic context redu
 **Compaction task profile**:
 The shared Task Profile assigned to the independent compaction Model Task. Its default is `fast`; the current session model is the final fallback when shared routes cannot complete compaction.
 _Avoid_: dedicated compaction model, package-owned model picker
+
+**Attempt record**:
+Session-only metadata for the last auto-compaction attempt. It contains time, trigger, route outcomes, durations, safe error codes, and the retry limit.
+It contains no messages, summaries, or error message text.
+_Avoid_: transcript, log

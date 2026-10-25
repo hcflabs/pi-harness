@@ -9,7 +9,7 @@ import {
 	type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { registerConfigReporting } from "@hcflabs/pi-config-store";
+import { recordDiagnostic, registerConfigReporting, registerDiagnosticsCommand } from "@hcflabs/pi-config-store";
 import { Type } from "typebox";
 import {
 	buildContextInjection,
@@ -217,6 +217,7 @@ export function createExternalAutocompleteProvider(
 }
 
 export default function addDirExtension(pi: ExtensionAPI, options: ExtensionOptions = {}): void {
+	registerDiagnosticsCommand(pi);
 	const globalStore = createAddDirConfigStore(options.agentDir);
 	const configReporter = registerConfigReporting(pi, [globalStore]);
 	// Report the latest file before a global write, so issues found after launch use the same deduplicated report.
@@ -263,8 +264,8 @@ export default function addDirExtension(pi: ExtensionAPI, options: ExtensionOpti
 	}
 
 	function warn(ctx: ExtensionContext, message: string): void {
+		recordDiagnostic("pi-add-dir", "warning", `pi-add-dir: ${message}`, ctx);
 		if (ctx.hasUI) ctx.ui.notify(message, "warning");
-		else console.error(`pi-add-dir: ${message.slice(0, 1_000)}`);
 	}
 
 	function rebuildDirs(ctx: ExtensionContext, showWarnings = false): boolean {

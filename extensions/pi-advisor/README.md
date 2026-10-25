@@ -25,10 +25,26 @@ Run `/advisor on`. Then send a prompt that makes the agent use tools. When the r
 | --- | --- | --- |
 | `/advisor on` | command | Turn the advisor on for this conversation branch. |
 | `/advisor off` | command | Turn the advisor off for this conversation branch. |
-| `/advisor status` | command | Show whether the advisor is on for this conversation branch. |
+| `/advisor status` | command | Show branch state and the last review record in this session. |
 | `Advisor reviewing…` | ui | Footer status while the review runs. |
 
 The advisor is off by default.
+
+### Status
+
+Run `/advisor status` to inspect the branch state and the last review record. Without a review, Pi shows `No advisor review in this session.`
+
+The record contains:
+
+- Start time and the route model that answered, or `none` if no route answered.
+- Failed route models and safe error codes.
+- Total duration in milliseconds.
+- Cost in USD when the response usage contains a known cost. The status omits unknown cost.
+- Verdict: `pass`, `nit`, `concern`, `blocker`, `malformed`, `failed`, `aborted`, or `discarded`. An active review shows `reviewing`.
+
+The verdict uses the strongest Grade in the delivered Notes. A held Blocker remains `blocker`. The status also shows the session's malformed response count.
+
+The command shows no user prompt, Review text, Notes, or error message text. Without UI, stdout contains the status.
 
 ### Results
 
@@ -56,6 +72,8 @@ The advisor is off by default.
 Pi Advisor keeps no files. `/advisor on` and `/advisor off` append a `pi-advisor` custom entry to the conversation. The latest entry on the current branch sets the state, so branch navigation, `/tree`, forks, and rewinds show the state of the selected branch.
 
 Each blocker follow-up is a visible `pi-advisor-blocker` message on the branch. Its `details` contain the notes.
+
+The review record and malformed response count stay only in memory. Session start clears both. Branch navigation changes on/off state, not the review record.
 
 ## Limits and recovery
 

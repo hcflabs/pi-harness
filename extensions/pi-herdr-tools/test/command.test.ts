@@ -7,6 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readDiagnostics } from "@hcflabs/pi-config-store";
 import herdrCommandExtension, { CHECKOUT_ACTIVITY_END, CHECKOUT_ACTIVITY_START, jobStatus, parseCommandParams } from "../internal/command.ts";
 import { shellProbe, success, withPane, type ExecResult } from "./helper.ts";
 
@@ -31,6 +32,26 @@ async function runRunner(directory: string) {
 	const child = spawn(process.execPath, [RUNNER, directory], { stdio: "ignore" });
 	await new Promise((resolve) => child.once("exit", resolve));
 }
+
+test("restore failures record a diagnostic without console output with UI", async (t) => {
+	await withPane("w1:p1", async () => {
+		const app = await commandHarness(t);
+		const id = "cmd-0123456789abcdef";
+		const directory = join(app.agentDir, "config", "pi-herdr-tools", "commands", id);
+		await mkdir(directory, { recursive: true });
+		await writeFile(join(directory, "job.json"), "{");
+		const error = t.mock.method(console, "error", () => {});
+		const warn = t.mock.method(console, "warn", () => {});
+		const log = t.mock.method(console, "log", () => {});
+		const stderr = t.mock.method(process.stderr, "write", () => true);
+		await app.handlers.get("session_start")!({}, { ...app.ctx, hasUI: true });
+		const event = readDiagnostics().at(-1)!;
+		assert.equal(event.source, "pi-herdr-tools");
+		assert.equal(event.level, "error");
+		assert.match(event.message, /job cmd-0123456789abcdef could not be restored/);
+		assert.equal(error.mock.callCount() + warn.mock.callCount() + log.mock.callCount() + stderr.mock.callCount(), 0);
+	});
+});
 
 test("parseCommandParams accepts each action only with its own fields", () => {
 	assert.deepEqual(parseCommandParams({ action: "start", command: "make", args: ["test"], access: "write" }),

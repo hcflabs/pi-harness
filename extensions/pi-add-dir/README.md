@@ -12,6 +12,8 @@ pi install npm:@hcflabs/pi-add-dir
 
 ## Use
 
+Use `/diagnostics` to read recent config reports and directory warnings.
+
 Run `/dir-add`, enter a directory, then run `/dir-ls` to verify it. Humans use commands; agents use tools.
 
 | Surface | Type | Purpose |

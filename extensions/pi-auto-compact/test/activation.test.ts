@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test, { afterEach, beforeEach } from "node:test";
+import test, { afterEach, beforeEach, mock } from "node:test";
 import { SessionManager, estimateTokens } from "@earendil-works/pi-coding-agent";
 import type {
 	ExtensionAPI,
@@ -159,7 +159,7 @@ test("configures threshold and warns about obsolete model fields", async () => {
 	assert.equal(notices.at(-1), "Threshold must be at least 25% and below 100%.");
 
 	await commands.get("auto-compact")?.("model", ctx);
-	assert.equal(notices.at(-1), "Usage: /auto-compact");
+	assert.equal(notices.at(-1), "Usage: /auto-compact [status]");
 
 	// A file that another session breaks while the input dialog is open is not replaced.
 	input = "50";
@@ -251,7 +251,8 @@ test("silences missing shared task-model config but reports present config error
 	await writeFile(autoCompactConfigFile(tempRoot), JSON.stringify({ autoCompactThreshold: 50 }));
 	const taskModelsFile = taskModelsConfigFile(tempRoot);
 
-	const handlers = loadExtension();
+	const commands = new Map<string, Command>();
+	const handlers = loadExtension(commands);
 	let compactionInstructions: string | undefined;
 	const notices: Array<[string, string]> = [];
 	const ctx = {
@@ -281,6 +282,12 @@ test("silences missing shared task-model config but reports present config error
 
 	assert.equal(await beforeCompact(), undefined);
 	assert.deepEqual(notices, []);
+	const statusCtx = { ...ctx, hasUI: true } as ExtensionContext;
+	await commands.get("auto-compact")?.("status", statusCtx);
+	assert.match(notices.at(-1)![0], /trigger resume/);
+	assert.match(notices.at(-1)![0], /Session model fallback: config-missing/);
+	assert.equal(notices.at(-1)![1], "info");
+	notices.length = 0;
 
 	await mkdir(join(tempRoot, "config", "pi-task-models"), { recursive: true });
 	await writeFile(taskModelsFile, malformed);
@@ -317,7 +324,8 @@ test("routes only auto compaction, carries file operations, and tries profile fa
 		},
 	}));
 
-	const handlers = loadExtension();
+	const commands = new Map<string, Command>();
+	const handlers = loadExtension(commands);
 	const authModels: string[] = [];
 	const notices: string[] = [];
 	let compactions = 0;
@@ -381,7 +389,11 @@ test("routes only auto compaction, carries file operations, and tries profile fa
 	assert.deepEqual(authModels, ["primary", "fallback"]);
 	assert.deepEqual([...fileOps.read], ["current-read.ts", "prior-read.ts"]);
 	assert.deepEqual([...fileOps.edited], ["current-edit.ts", "prior-edit.ts"]);
-	assert.deepEqual(notices, ["Configured task model routes failed; using current session model."]);
+	assert.deepEqual(notices, ["Configured task model routes failed (Error); using current session model."]);
+	await commands.get("auto-compact")?.("status", { ...ctx, hasUI: true } as ExtensionContext);
+	assert.match(notices.at(-1)!, /Route primary\/model: failed · \d+ ms · Error/);
+	assert.match(notices.at(-1)!, /Route fallback\/model: failed · \d+ ms · Error/);
+	assert.doesNotMatch(notices.at(-1)!, /authentication failed|missing/);
 });
 
 test("uses profile fallback and passes its thinking level to compaction", async () => {
@@ -399,7 +411,8 @@ test("uses profile fallback and passes its thinking level to compaction", async 
 		},
 	}));
 
-	const handlers = loadExtension();
+	const commands = new Map<string, Command>();
+	const handlers = loadExtension(commands);
 	let autoInstructions: string | undefined;
 	const model = {
 		id: "model",
@@ -443,6 +456,7 @@ test("uses profile fallback and passes its thinking level to compaction", async 
 						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } } }) };
 			},
 		},
+		hasUI: true,
 		ui: { notify() {} },
 	} as unknown as ExtensionContext;
 
@@ -470,6 +484,12 @@ test("uses profile fallback and passes its thinking level to compaction", async 
 	assert.equal(result?.compaction?.summary, "summary");
 	assert.deepEqual(authModels, ["primary", "provider"]);
 	assert.deepEqual(streamed, [{ provider: "provider", reasoning: "max" }]);
+	let status = "";
+	ctx.ui.notify = (message) => { status = message; };
+	await commands.get("auto-compact")?.("status", ctx);
+	assert.match(status, /Route primary\/model: failed/);
+	assert.match(status, /Route provider\/model: succeeded/);
+	assert.doesNotMatch(status, /summary|test-key/);
 });
 
 test("exceptional resume compaction sends a continuation after success", async () => {
@@ -615,7 +635,8 @@ test("ineligible reads stay intact and branch changes discard pending boundary d
 	await mkdir(join(tempRoot, "config", "pi-auto-compact"), { recursive: true });
 	await writeFile(autoCompactConfigFile(tempRoot), JSON.stringify({ autoCompactThreshold: 25 }));
 	for (const scenario of ["changed arguments", "changed content", "failed", "image", "edited", "missing call", "switched branch"]) {
-		const handlers = loadExtension();
+		const commands = new Map<string, Command>();
+		const handlers = loadExtension(commands);
 		const sm = SessionManager.inMemory(tempRoot);
 		const text = "output ".repeat(900);
 		sm.appendMessage({ role: "user", content: "Read file", timestamp: 1 });
@@ -663,6 +684,10 @@ test("ineligible reads stay intact and branch changes discard pending boundary d
 		} else {
 			assert.ok(notices.some((notice) => notice.includes("Auto-compaction failed")), scenario);
 		}
+		await commands.get("auto-compact")?.("status", { ...ctx, hasUI: true } as ExtensionContext);
+		assert.match(notices.at(-1)!, scenario === "switched branch" ? /Outcome discarded/ : /Outcome failed/);
+		assert.match(notices.at(-1)!, scenario === "switched branch" ? /session or branch changed/ : /failed boundary\. No retry until the next boundary/);
+		assert.doesNotMatch(notices.at(-1)!, /no model|output output/);
 	}
 });
 
@@ -696,7 +721,8 @@ test("completed final boundary persists routed summary, usage, and read tracking
 	sm.appendMessage(final);
 	const model = { id: "model", name: "Model", api: "openai-completions", provider: "fake", reasoning: false,
 		input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 6_000, maxTokens: 600 };
-	const handlers = loadExtension();
+	const commands = new Map<string, Command>();
+	const handlers = loadExtension(commands);
 	let requestBody = "";
 	const streamed: unknown[] = [];
 	const ctx = { cwd: tempRoot, isProjectTrusted: () => true, model, sessionManager: sm,
@@ -735,6 +761,74 @@ test("completed final boundary persists routed summary, usage, and read tracking
 	sm.appendCompaction(checkpoint.summary, checkpoint.firstKeptEntryId, 1, checkpoint.details, true,
 		checkpoint.usage as never);
 	assert.equal(sm.buildSessionProjection().messages.some((message) => message.role === "toolResult"), false);
+	let status = "";
+	ctx.ui.notify = (message) => { status = message; };
+	await commands.get("auto-compact")?.("status", { ...ctx, hasUI: true } as ExtensionContext);
+	assert.match(status, /trigger agent_before_settle/);
+	assert.match(status, /Route fake\/model: succeeded · \d+ ms/);
+	assert.match(status, /Outcome succeeded · total \d+ ms/);
+	assert.match(status, /Session model fallback: config-missing/);
+	assert.match(status, /Retries: completed/);
+	assert.doesNotMatch(status, /valid summary|Earlier decisions|src\/file/);
+});
+
+test("status records native compaction completion and safe failure codes without a footer", async () => {
+	await writeFile(join(tempRoot, "settings.json"), JSON.stringify({ compaction: { enabled: false } }));
+	const commands = new Map<string, Command>();
+	const handlers = loadExtension(commands);
+	const sm = SessionManager.inMemory(tempRoot);
+	const notices: string[] = [];
+	let callbacks!: { onComplete: () => void; onError: (error: Error) => void; customInstructions: string };
+	const ctx = {
+		cwd: tempRoot, hasUI: true, sessionManager: sm, isProjectTrusted: () => true,
+		model: { provider: "session", id: "model" }, scopedModels: [], modelRegistry: { getAvailable: () => [] },
+		getContextUsage: () => ({ tokens: 75, contextWindow: 100, percent: 75 }),
+		compact: (options: typeof callbacks) => { callbacks = options; }, isIdle: () => false,
+		ui: { notify: (message: string) => notices.push(message), setStatus: () => assert.fail("Pi already shows the compaction loader") },
+	} as unknown as ExtensionContext;
+	handlers.get("session_start")?.({ type: "session_start", reason: "startup" } as never, ctx);
+	await commands.get("auto-compact")?.("status", ctx);
+	assert.equal(notices.pop(), "No auto-compact attempt in this session.");
+	for (const [error, code] of [
+		[Object.assign(new Error("private error"), { code: "provider-code" }), "provider-code"],
+		[Object.assign(new Error("private error"), { status: 503 }), "http-503"],
+		[Object.assign(new Error("private error"), { name: "AbortError" }), "AbortError"],
+		[Object.assign(new Error("private error"), { name: "private error name" }), "error"],
+		[Object.defineProperty(new Error("private error"), "code", { get() { throw new Error("private metadata"); } }), "error"],
+	] as const) {
+		handlers.get("session_start")?.({ type: "session_start", reason: "resume" } as never, ctx);
+		await handlers.get("session_before_compact")?.({ type: "session_before_compact", customInstructions: callbacks.customInstructions,
+			signal: new AbortController().signal, branchEntries: [],
+			preparation: { fileOps: { read: new Set(), written: new Set(), edited: new Set() } },
+		} as never, ctx);
+		assert.equal(notices.length, 0, "missing config adds no notice");
+		callbacks.onError(error);
+		assert.equal(notices.length, 0, "the native error callback adds no notice");
+		await commands.get("auto-compact")?.("status", ctx);
+		const status = notices.pop()!;
+		assert.match(status, new RegExp(`Route session/model: ${code === "AbortError" ? "aborted" : "failed"} · \\d+ ms · ${code}`));
+		assert.match(status, new RegExp(`error ${code}`));
+		assert.match(status, /Session model fallback: config-missing/);
+		assert.match(status, /native compaction stopped\. The next request can retry/);
+		assert.doesNotMatch(status, /private/);
+	}
+	handlers.get("session_start")?.({ type: "session_start", reason: "resume" } as never, ctx);
+	callbacks.onComplete();
+	await commands.get("auto-compact")?.("status", ctx);
+	assert.match(notices.pop()!, /Outcome succeeded/);
+	handlers.get("session_start")?.({ type: "session_start", reason: "startup" } as never, ctx);
+	await commands.get("auto-compact")?.("status", ctx);
+	assert.equal(notices.pop(), "No auto-compact attempt in this session.");
+	let output = "";
+	const stdout = mock.method(process.stdout, "write", (text: string) => { output += text; return true; });
+	try {
+		await commands.get("auto-compact")?.("status", { ...ctx, hasUI: false } as ExtensionContext);
+		assert.equal(output, "No auto-compact attempt in this session.\n");
+		assert.equal(notices.length, 0);
+	} finally {
+		stdout.mock.restore();
+	}
+	await new Promise<void>((resolve) => setImmediate(resolve));
 });
 
 test("activates only when Pi built-in auto-compaction is disabled", async () => {
