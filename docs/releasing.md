@@ -44,7 +44,7 @@ When a published README links local files, include them in the package allowlist
 The floor is the oldest Pi version the package supports, normally the major's `.0` release (for example `^1.0.0`). Pin Pi `devDependencies` to the floor.
 
 - Keep the floor when unchanged code works with the target. Do not raise a peer dependency's minimum merely to match the development or validation version.
-- Raise the floor only to adopt a Pi feature or required fix. Use the first version that provides it, for example `^1.0.4`. Within one Pi major, this is a minor release of our package. State the new minimum in its README and update Pi `devDependencies` to the new floor.
+- Raise the floor only to adopt a Pi feature or required fix. Use the first version that provides it, for example `^1.0.4`. Within one Pi major, this is a minor release of our package. State the new minimum in its README and update Pi `devDependencies` to the new floor. If the new floor is above `PI_MIN_VERSION` in `website/public/install.sh`, raise that value and update `website/scripts/installer.test.mjs`.
 - Accept a new Pi major by widening the range when unchanged code supports both, for example `^1.0.0 || ^2.0.0`. Dropping a Pi major is a major release of our package.
 - Use the same range style across Pi peers in a package. Add a Pi peer only for a directly imported package. Preserve unrelated peers such as `typebox`.
 

@@ -77,4 +77,4 @@ Other Git failures throw. A bare repository throws, because it has no work tree.
 | `RepoOptions` | type | Configure the Git runner, cancellation, and Git time limit. |
 | `DiscoveryOptions` | type | Configure the search path, depth, and limits. |
 
-All functions accept `signal` for cancellation and `runProcess` to replace the Git runner in tests.
+`gitTopLevel`, `resolveRepoTarget`, and `discoverRepos` accept `signal` for cancellation and `runProcess` to replace the Git runner in tests.

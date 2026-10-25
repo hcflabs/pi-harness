@@ -46,7 +46,7 @@ Commands, prompts, and UI are for you. Tools and the packaged skill are for Main
 | Direct status widget (`D`) | ui | Show direct workflows as a tree under `Main` with references, names, Role badges, status, routes, elapsed time, measured task tokens, cost, and tool activity. In fullscreen mode, a click on a working or finished worker row focuses that worker's verified Herdr pane. |
 | Isolated status widget (`I`) | ui | Show recorded task state, Role/model-class badges, and retained workspaces in the TUI. Readiness does not mean promotion. |
 
-`delegate_task`, `subagent_resume`, `subagent_stage`, `subagent_integrate`, and `subagent_abort` are model-only. Main must make these decisions visibly; `codemode` scripts can call only `subagent_status`.
+`delegate_task`, `subagent_resume`, `subagent_stage`, `subagent_integrate`, and `subagent_abort` are model-only. Main must make these decisions visibly; `codemode` scripts can call only `subagent_status` and `subagent_repos`.
 
 ### Direct workflow
 

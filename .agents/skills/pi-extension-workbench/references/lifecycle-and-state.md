@@ -1,6 +1,6 @@
 # Lifecycle and State
 
-Read matching installed `docs/extensions.md` sections: `Respect the runtime
+Read matching installed `docs/extensions.md` sections: `Understand the runtime
 lifecycle`, `Events and concurrency`, `State`, or `Errors and cleanup`.
 Verify payloads and result contracts in installed event declarations.
 Example paths below are relative to `examples/extensions/`.

@@ -5,7 +5,7 @@ Pi Footer shows checkout identity, model usage, work time, and extension status.
 ## Language
 
 **Footer identity**:
-The repository and branch label for the current checkout, with local Git conditions that need attention. PR status is separate information beside this identity.
+The repository and branch label for the current checkout, with local Git conditions that need attention.
 _Avoid_: Checkout identity, working-directory path, clean badge
 
 **Usage line**:
@@ -20,7 +20,7 @@ Cumulative time spent in agent runs, including automatic retries and auto-compac
 _Avoid_: Session age, response duration, session time
 
 **External status line**:
-The third-line area for CodeGraph and other extension statuses not assigned to the PR position. It includes both first-party and external extensions.
+The third-line area for CodeGraph and other extension statuses. It includes both first-party and external extensions.
 _Avoid_: rewritten status
 
 **Footer color role**:

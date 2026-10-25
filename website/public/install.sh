@@ -7,12 +7,13 @@ set -eu
 
 PI_INSTALLER_URL="https://pi.dev/install.sh"
 PI_LATEST_URL="https://pi.dev/api/installer/releases/latest"
-PI_MIN_VERSION="1.1.0"
+PI_MIN_VERSION="1.3.0"
 HERDR_INSTALLER_URL="https://herdr.dev/install.sh"
 HERDR_LATEST_URL="https://herdr.dev/latest.json"
 HERDR_MIN_VERSION="0.7.4"
-HERDR_SUBAGENT_MIN_VERSION="0.9.0"
-SUBAGENT_PACKAGE="@hcflabs/pi-subagent"
+# Extensions that call the Herdr CLI need this version or later.
+HERDR_CONSUMER_MIN_VERSION="0.9.3"
+HERDR_CONSUMER_PACKAGES="@hcflabs/pi-herdr-tools @hcflabs/pi-subagent"
 
 # BEGIN GENERATED EXTENSIONS
 EXTENSIONS='
@@ -280,10 +281,12 @@ ensure_pi() {
 select_herdr_minimum() {
   required_herdr_version=$HERDR_MIN_VERSION
   for extension in $selected_extensions; do
-    if [ "$extension" = "$SUBAGENT_PACKAGE" ]; then
-      required_herdr_version=$HERDR_SUBAGENT_MIN_VERSION
-      return 0
-    fi
+    for consumer in $HERDR_CONSUMER_PACKAGES; do
+      if [ "$extension" = "$consumer" ]; then
+        required_herdr_version=$HERDR_CONSUMER_MIN_VERSION
+        return 0
+      fi
+    done
   done
 }
 

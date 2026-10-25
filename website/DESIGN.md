@@ -278,7 +278,7 @@ Use the shared `0.25rem` radius for buttons, cards, and compact controls. Use `9
 
 ### Extension Card
 
-Package name and version form the scan line, with the name in Geist Mono. A short explanation follows, then a divider and download proof. The whole card is one keyboard-focusable link.
+The package name forms the scan line, in Geist Mono. A short explanation follows, then the download badge. The whole card is one keyboard-focusable link.
 
 ### Extension Catalog
 

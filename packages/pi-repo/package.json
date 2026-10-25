@@ -1,6 +1,6 @@
 {
   "name": "@hcflabs/pi-repo",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Git repository target validation and child repository discovery for Pi packages.",
   "keywords": [
     "pi-package",

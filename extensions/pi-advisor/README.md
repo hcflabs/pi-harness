@@ -80,7 +80,7 @@ The review record and malformed response count stay only in memory. Session star
 | Limit | Behavior | Recovery |
 | --- | --- | --- |
 | Interactive only | The advisor does not run in print mode or other modes without UI. | Examine the run manually. |
-| No route | Pi shows a warning that names `/task-models`. The advisor does not use the session model. | Run `/task-models` and set a route for the `pi-advisor/review` profile. |
+| No route | Pi shows a warning that names `/task-models`. The advisor does not use the session model. | Run `/task-models`. Configure the `balanced` profile, or assign another configured profile to the `pi-advisor/review` Model Task. |
 | Time limit | The review stops after 90 seconds and Pi shows a warning. Pi shows no notes. | Send the next prompt. |
 | Cancel | A new prompt, a new run, branch navigation, `/advisor off`, or session exit cancels the review. Pi shows no notice. Escape in an idle session does not cancel it. | Send a prompt to cancel the review. |
 | Old reply | When the branch changes or Pi starts work before the reply arrives, Pi Advisor ignores the reply. | Send a prompt to start a new run. |
