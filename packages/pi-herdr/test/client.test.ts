@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createHerdrClient, startPiAgent, type HerdrExecResult } from "../src/index.ts";
+import { awaitShellPrompt, createHerdrClient, startPiAgent, type HerdrExecResult } from "../src/index.ts";
 
 test("createHerdrClient copies caller args and forwards to executor", async () => {
 	const args = Object.freeze(["agent", "list"]);
@@ -98,6 +98,51 @@ test("startPiAgent leaves an occupied pane alone so agent start reports contenti
 
 	assert.equal(result, busy);
 	assert.deepEqual(calls.map((args) => args.slice(0, 2)), [["pane", "process-info"], ["agent", "start"]]);
+});
+
+test("startPiAgent waits on a fresh pane while startup files run foreground jobs", async () => {
+	const calls: string[][] = [];
+	// Oh My Zsh startup runs commands such as grep in their own process group, between idle shell readings.
+	const readings = [777, 778, 501];
+	let token = "";
+	const client = createHerdrClient(async (_command, args) => {
+		calls.push(args);
+		if (args[0] === "agent") return { code: 0, stdout: '{"result":{"type":"agent_started"}}', stderr: "" };
+		if (args[1] === "process-info") return processInfo(readings.shift() ?? 501);
+		if (args[1] === "run") {
+			token = args[3]!.replace(/^echo /, "");
+			return ok;
+		}
+		return { ...ok, stdout: `\u276f echo ${token}\n${token}\n\u276f ` };
+	});
+	const delays: number[] = [];
+
+	const result = await startPiAgent(client, {
+		name: "worker", pane: "pane-1", args: [], options: {}, freshPane: true,
+		delay: async (milliseconds) => { delays.push(milliseconds); },
+		shouldRetry: () => false,
+	});
+
+	assert.equal(result.code, 0);
+	assert.deepEqual(calls.map((args) => args[1]), ["process-info", "process-info", "process-info", "run", "read", "start"]);
+	assert.deepEqual(delays, [100, 100]);
+});
+
+test("awaitShellPrompt bounds the wait for a fresh pane shell", async () => {
+	let readings = 0;
+	const client = createHerdrClient(async (_command, args) => {
+		assert.equal(args[1], "process-info", "a pane that never frees its shell gets no typed input");
+		readings += 1;
+		return processInfo(777);
+	});
+
+	const failed = await awaitShellPrompt(client, "pane-1", {}, async () => {}, true, true);
+
+	assert.equal(readings, 200);
+	assert.match(failed?.stderr ?? "", /runs a foreground program, not its shell/);
+	readings = 0;
+	assert.equal(await awaitShellPrompt(client, "pane-1", {}, async () => {}, false, true), undefined);
+	assert.equal(readings, 200);
 });
 
 test("startPiAgent returns a failed readiness probe without starting the agent and rejects malformed process info", async () => {

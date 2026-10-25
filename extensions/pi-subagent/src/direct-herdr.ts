@@ -222,7 +222,7 @@ export function createDirectHerdr(pi: Pick<ExtensionAPI, "exec">, cwd: string, i
 				onTab({ name, tabId, paneId, sessionFile, leasePath, turn, workspaceId, cwd: workingDir });
 				signal.throwIfAborted();
 				const started = await startPiAgent(herdr, { name, pane: paneId,
-					args: [...sessionArgs, "--session", sessionFile], options: options(signal), shouldRetry: () => false });
+					args: [...sessionArgs, "--session", sessionFile], options: options(signal), shouldRetry: () => false, freshPane: true });
 				if (started.code !== 0 || started.killed) throw new Error(`Herdr agent start failed: ${started.stderr.slice(0, 1000)}`);
 				if (inspect(JSON.parse(started.stdout), "agent_started", name, paneId, tabId) !== "idle") throw new Error("Herdr agent was not idle after start.");
 				// A canceled start may have succeeded server-side; retain its tab but
