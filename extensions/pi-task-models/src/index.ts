@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { Container, Key, matchesKey, SelectList, Text } from "@earendil-works/pi-tui";
+import { Container, Key, matchesKey, SelectList, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { getAgentDir, getSelectListTheme, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -322,6 +322,21 @@ export function resolveConfiguredTaskRoutes(
 	const declaration = validatedModelTask(task);
 	const store = taskModelsConfigStore(agentDir);
 	const loaded = store.loadSync();
+	const { profileName, profile } = configuredTaskProfile(store, loaded, declaration);
+	const routes: ResolvedTaskRoute[] = [];
+	for (const route of orderedProfileRoutes(profile)) {
+		const resolved = resolveTaskModelRoute(ctx, route, thinking);
+		if (resolved) routes.push(resolved);
+	}
+	if (!routes.length) throw noTaskRouteError(declaration, profileName, thinking);
+	return routes;
+}
+
+function configuredTaskProfile(
+	store: TaskModelsConfigStore,
+	loaded: ReturnType<TaskModelsConfigStore["loadSync"]>,
+	declaration: ModelTask,
+): { profileName: ProfileName; profile: TaskModelProfile } {
 	if (loaded.status === "disabled") throw taskRouteError("config-disabled", disabledConfigMessage(store.path, loaded.issues));
 	if (loaded.source === "missing") {
 		throw taskRouteError("config-missing", "Task model config is missing. Run /task-models to configure task routes.");
@@ -339,19 +354,15 @@ export function resolveConfiguredTaskRoutes(
 			profileName,
 		);
 	}
-	const routes: ResolvedTaskRoute[] = [];
-	for (const route of orderedProfileRoutes(profile)) {
-		const resolved = resolveTaskModelRoute(ctx, route, thinking);
-		if (resolved) routes.push(resolved);
-	}
-	if (!routes.length) {
-		throw taskRouteError(
-			"no-route",
-			`Task ${declaration.id} profile ${profileName} has no available route${thinking ? ` supporting thinking ${thinking}` : ""}. Run /task-models.`,
-			profileName,
-		);
-	}
-	return routes;
+	return { profileName, profile };
+}
+
+function noTaskRouteError(task: ModelTask, profileName: ProfileName, thinking?: ThinkingLevel): TaskRouteError {
+	return taskRouteError(
+		"no-route",
+		`Task ${task.id} profile ${profileName} has no available route${thinking ? ` supporting thinking ${thinking}` : ""}. Run /task-models.`,
+		profileName,
+	);
 }
 
 // Machine-readable cause so consumers can render their own user-facing wording.
@@ -371,22 +382,68 @@ export function resolveConfiguredTaskRoute(
 	return resolveConfiguredTaskRoutes(ctx, task, agentDir, thinking)[0];
 }
 
+export type TaskRouteAttempt = Readonly<{
+	routeIndex: number;
+	model: string;
+	outcome: "succeeded" | "failed" | "aborted";
+	durationMs: number;
+	errorCode?: string;
+	error?: string;
+}>;
+
+function singleLine(text: string): string {
+	return text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
+}
+
+function attemptError(error: unknown): { errorCode: string; error: string } {
+	const fields = error && typeof error === "object" ? error as Record<string, unknown> : {};
+	const code = [fields.taskRouteCode, fields.code, fields.name]
+		.find((value) => (typeof value === "string" && value.length > 0) || typeof value === "number");
+	return {
+		errorCode: code === undefined ? "error" : singleLine(String(code)),
+		error: singleLine(typeof fields.message === "string" ? fields.message : errorMessage(error)).slice(0, 300),
+	};
+}
+
+/** Observer failures do not change route results. The executor does not await observer promises. */
 export async function executeTaskRoutes<T>(
 	routes: readonly ResolvedTaskRoute[],
 	attempt: (route: ResolvedTaskRoute) => Promise<T>,
-	{ signal, shouldFallback }: { signal?: AbortSignal; shouldFallback: (error: unknown) => boolean },
+	{ signal, shouldFallback, onAttempt }: {
+		signal?: AbortSignal;
+		shouldFallback: (error: unknown) => boolean;
+		onAttempt?: (attempt: TaskRouteAttempt) => void | Promise<void>;
+	},
 ): Promise<T> {
 	if (!routes.length) throw new Error("Task route list must not be empty.");
-	for (const route of routes.slice(0, -1)) {
+	for (const [routeIndex, route] of routes.entries()) {
 		signal?.throwIfAborted();
+		const started = performance.now();
+		const report = (outcome: TaskRouteAttempt["outcome"], error?: unknown) => {
+			if (!onAttempt) return;
+			try {
+				const record: TaskRouteAttempt = Object.freeze({
+					routeIndex,
+					model: modelReference(route.model),
+					outcome,
+					durationMs: performance.now() - started,
+					...(outcome === "succeeded" ? {} : attemptError(error)),
+				});
+				Promise.resolve(onAttempt(record)).catch(() => {});
+			} catch {
+				// The observer must not change the result or the fallback decision.
+			}
+		};
 		try {
-			return await attempt(route);
+			const result = await attempt(route);
+			report("succeeded");
+			return result;
 		} catch (error) {
-			if (signal?.aborted || !shouldFallback(error)) throw error;
+			report(signal?.aborted || (error instanceof Error && error.name === "AbortError") ? "aborted" : "failed", error);
+			if (routeIndex === routes.length - 1 || signal?.aborted || !shouldFallback(error)) throw error;
 		}
 	}
-	signal?.throwIfAborted();
-	return attempt(routes[routes.length - 1]);
+	throw new Error("Task route list must not be empty.");
 }
 
 export function orderedProfileRoutes(profile: TaskModelProfile): TaskModelRoute[] {
@@ -531,11 +588,28 @@ export function createTaskModelsExtension(
 		}
 	});
 	pi.registerCommand("task-models", {
-		description: "configure shared task model profiles; choose a saved setup with /task-models preset",
+		description: "Configure shared task model profiles. Use /task-models preset for presets or /task-models status for current routes.",
 		handler: async (args, ctx) => {
 			const action = args.trim();
-			if (action && action !== "preset") {
-				ctx.ui.notify("Usage: /task-models [preset]", "error");
+			if (action && action !== "preset" && action !== "status") {
+				ctx.ui.notify("Usage: /task-models [preset|status]", "error");
+				return;
+			}
+			if (action === "status") {
+				// Status shows all current issues. The reporter records them without a second notification.
+				const loaded = configStore.loadSync();
+				for (const [store, result] of [[configStore, loaded], [presetsStore, presetsStore.loadSync()]] as const) {
+					reporter.report({ hasUI: true, ui: { ...ctx.ui, notify() {} } }, store, result);
+					for (const issue of result.issues) {
+						notifyTaskModelsStatus(ctx, `Config ${store.path}: ${formatConfigIssues([issue])}`, result.status === "disabled" ? "error" : "warning");
+					}
+				}
+				const tasks = discoverModelTasks(pi);
+				if (!tasks.length) notifyTaskModelsStatus(ctx, "No Model Tasks are active.", "info");
+				for (const task of tasks) {
+					const status = taskModelStatus(ctx, configStore, loaded, task);
+					notifyTaskModelsStatus(ctx, status.text, status.level);
+				}
 				return;
 			}
 			reporter.report(ctx, configStore, configStore.loadSync());
@@ -661,6 +735,47 @@ async function saveTaskModelsConfig(
 		ctx.ui.notify(`Couldn't save task model config: ${errorMessage(error)}`, "error");
 		return false;
 	}
+}
+
+function notifyTaskModelsStatus(ctx: ExtensionContext, text: string, level: "info" | "warning" | "error"): void {
+	const line = singleLine(text);
+	if (ctx.hasUI) {
+		const color = level === "info" ? "accent" : level;
+		ctx.ui.notify(truncateToWidth(ctx.ui.theme.fg(color, line), Math.max(1, (process.stdout.columns ?? 120) - 2)), level);
+	} else {
+		process.stdout.write(`${line}\n`);
+	}
+}
+
+function taskModelStatus(
+	ctx: TaskModelContext,
+	store: TaskModelsConfigStore,
+	loaded: ReturnType<TaskModelsConfigStore["loadSync"]>,
+	task: ModelTask,
+): { text: string; level: "info" | "warning" | "error" } {
+	let primary = "none";
+	let fallback = "none";
+	const issues: string[] = [];
+	let level: "info" | "warning" | "error" = "info";
+	try {
+		const { profileName, profile } = configuredTaskProfile(store, loaded, task);
+		const slots = orderedProfileRoutes(profile).map((route, index) => {
+			const resolved = resolveTaskModelRoute(ctx, route);
+			if (!resolved) issues.push(`${index === 0 ? "primary" : "fallback"} slot unavailable`);
+			return { label: routeLabel(resolved ? { model: modelReference(resolved.model), thinkingLevel: resolved.thinkingLevel } : route), resolved };
+		});
+		primary = slots[0].label;
+		fallback = slots[1]?.label ?? "none";
+		if (issues.length) level = "warning";
+		if (!slots.some(({ resolved }) => resolved)) throw noTaskRouteError(task, profileName);
+	} catch (error) {
+		issues.push(`${(error as TaskRouteError).taskRouteCode ?? "error"}: ${errorMessage(error)}`);
+		level = "error";
+	}
+	return {
+		text: `${task.label} (${task.id}) · primary ${primary} · fallback ${fallback}${issues.length ? ` · ${issues.join(". ")}` : ""}`,
+		level,
+	};
 }
 
 function routeLabel(route: TaskModelRoute): string {
