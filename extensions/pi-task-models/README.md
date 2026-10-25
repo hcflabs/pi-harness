@@ -31,10 +31,19 @@ Run `/task-models`, select `fast`, then choose a primary model and thinking leve
 | --- | --- | --- |
 | `/task-models` | command | For people: configure profiles and assign them to active tasks. |
 | `/task-models preset` | command | For people: apply a saved profile setup. |
+| `/task-models status` | command | For people: inspect current task routes, unavailable slots, and config issues. |
 | Option+S / Alt+S in `/task-models` | shortcut | For people: save configured profiles as a named preset in the interactive terminal. |
 | Session start | ui | For people: warn about missing config and config or preset problems. Show an error when routing is disabled. |
 
 Configure each profile your consumers require. `fav` has no fallback. Select an active task to override its declared profile; choosing its declared default removes the override.
+
+### Status
+
+Run `/task-models status` to inspect each active Model Task with the current config and session scope. The command does not execute routes or change files.
+
+Each task line contains the task name and ID, primary model and thinking level, fallback route or `none`, and issues. Unavailable primary and fallback slots remain visible. Route errors contain the `TaskRouteError` code and message. Config and preset issues appear on every status request, including issues reported earlier in the session.
+
+With UI, each notification uses one line and the current theme. The notification truncates text to the terminal width. Without UI, stdout contains the complete lines. The command does not display prompts, messages, reviews, or model output.
 
 ### Presets
 
@@ -114,6 +123,7 @@ Applying a preset can create missing active config. Config problems require conf
 | `ResolvedTaskRoute` | type | Session-resolved model and thinking level. |
 | `TaskRouteErrorCode` | type | Route failure code. |
 | `TaskRouteError` | type | Error with code and optional profile name. |
+| `TaskRouteAttempt` | type | Frozen record for one executed route, with model, outcome, duration, and an optional bounded error code. |
 | `registerModelTask(pi, task)` | function | Registers a consumer declaration at extension load. |
 | `loadTaskModelsConfig(agentDir?)` | function | Reads and validates config; throws when disabled. |
 | `registerTaskModelsConfigReporting(pi, agentDir?)` | function | Reports problems at session start; returns `report(ctx)` for later problems. |
@@ -126,7 +136,7 @@ Applying a preset can create missing active config. Config problems require conf
 | `resolveTaskModelRoute(ctx, route, thinking?)` | function | Resolves one available route. |
 | `resolveConfiguredTaskRoute(ctx, task, agentDir?, thinking?)` | function | Resolves the first usable task route. |
 | `resolveConfiguredTaskRoutes(ctx, task, agentDir?, thinking?)` | function | Resolves configured task route candidates. |
-| `executeTaskRoutes(routes, attempt, { shouldFallback, signal? })` | function | Tries resolved routes in order; returns first success. |
+| `executeTaskRoutes(routes, attempt, { shouldFallback, signal?, onAttempt? })` | function | Tries resolved routes in order. Returns first success and can report each executed route. |
 | `orderedProfileRoutes(profile)` | function | Returns primary, then optional fallback. |
 | `createTaskModelsExtension(pi, options?)` (also default export) | function | Registers `/task-models`, missing-config warnings, and issue reporting. |
 
@@ -136,7 +146,29 @@ Consumers must not read or write shared config directly. Register `registerTaskM
 
 `loadTaskModelsConfig()` returns `source: "file"` or `"missing"`. Missing config returns `{ source: "missing", value: { "profiles": {}, "tasks": {} } }` without creating files. Disabled-config errors give the path and problems.
 
-`executeTaskRoutes()` only executes supplied routes. It does not resolve, authenticate, inspect providers, log, wait, or retry routes. It rejects empty lists and checks `signal` before each route. Cancellation or `shouldFallback(error) === false` stops execution. Allowed failures end with the final error unchanged. Each route call must be atomic and safe to repeat.
+`executeTaskRoutes()` only executes supplied routes. It does not resolve, authenticate, inspect providers, store logs, or retry routes. It rejects empty lists and checks `signal` before each route. Cancellation or `shouldFallback(error) === false` stops execution. Allowed failures end with the final error unchanged. Each route call must be atomic and safe to repeat.
+
+The optional `onAttempt(record)` receives one frozen `TaskRouteAttempt` after each executed route, including the last route. Routes cancelled before execution produce no record. A record contains no route result, request data, or error message text. The executor never copies error messages or thrown strings into records.
+
+| Field | Meaning |
+| --- | --- |
+| `routeIndex` | Zero-based index in the supplied routes array. |
+| `model` | Actual resolved `provider/id`, including a numbered Codex provider when selected. |
+| `outcome` | `succeeded`, `failed`, or `aborted`. An aborted signal or an `AbortError` marks a rejected route as `aborted`. |
+| `durationMs` | Elapsed route execution time in milliseconds. |
+| `errorCode` | Bounded failure code. Uses `error` when no accepted code, status, or name exists. |
+
+The executor selects `errorCode` in this order:
+
+1. Use a non-empty string `taskRouteCode` on one line, limited to 64 characters.
+2. Use a non-empty string `error.code` on one line, limited to 64 characters.
+3. Use a finite numeric `error.status` as `http-<status>`.
+4. Use `error.name` only if it matches `/^[A-Za-z][A-Za-z0-9_]{0,63}$/`.
+5. Use `error` otherwise.
+
+If error metadata access throws, the record uses `errorCode: "error"`. If abort classification fails, the outcome is `failed` unless the signal is aborted. These failures do not change the route result or fallback decision.
+
+Successful records omit `errorCode`. The observer can return a promise, but execution does not wait for it. The executor catches and ignores observer failures. Observer failures do not change route results or fallback decisions.
 
 ## Limits and recovery
 
