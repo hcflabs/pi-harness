@@ -42,7 +42,8 @@ Users browse the documentation in the GitHub repository `hcflabs/pi-harness` and
 - Root repository README and package READMEs.
 - Package manifests under `extensions/` and `packages/`.
 - Website implementation in `website/pages/`, `website/components/`, and `website/blume.config.ts`.
-- No independent user research, testimonials, or measured outcome claims are available for publication.
+- One maintainer token comparison, published in the homepage hero: Pi + Harness used 17.7M total tokens and Codex used 70.9M, when both harnesses implemented the same plan. Total tokens count input, output, and cache tokens. The repository does not store the run data.
+- No independent user research, testimonials, or other measured outcome claims are available for publication.
 
 ## Product Principles
 

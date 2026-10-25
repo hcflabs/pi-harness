@@ -81,7 +81,7 @@ Direct `changeset` is rejected; use isolated mode for checked integration. Resou
 
 ### Dry run
 
-Set `"dryRun": true` on a direct or isolated `delegate_task` request to check it without a launch. The dry run does the same checks as a launch: request shape, Role lookup, route and model with thinking level, Skills, tools, MCP allowlist, Role extensions, config, and `continueFrom` eligibility. For an isolated request, it also checks the task graph and that Main is clean and committed. If the request has a changeset task, it also selects the Full suite, adds it to the final checks, and shows it. A failed check gives the same error as a launch.
+Set `"dryRun": true` on a direct or isolated `delegate_task` request to check it without a launch. The dry run does the same checks as a launch: request shape, Role lookup, route and model with thinking level, Skills, tools, MCP allowlist, Role extensions, config, and `continueFrom` eligibility. For an isolated request, it also checks the task graph and pins Main's committed branch, HEAD, and tree. Dirty files in Main do not block the dry run or admission. If the request has a changeset task, it also selects the Full suite, adds it to the final checks, and shows it. A failed check gives the same error as a launch.
 
 The result is a bounded plan. It shows each task's Role, resolved `provider/model`, thinking level, access or kind, dependencies, and checks. An isolated plan also shows the final checks. The dry run makes no Herdr call, Herdr tab, session record, saved state, worktree, lease, checkout admission, or follow-up. The plan lists each check it cannot do without such an effect as `Not checked: <reason>`. Examples are the Herdr host preflight, checkout admission, and the stop of a continued agent.
 
@@ -281,7 +281,7 @@ Every task declares `id`, `kind`, `role`, `modelClass`, `requirements`, `deliver
 
 Admission and worker-wave dispatch pin Main's exact committed branch, HEAD, and tree without inspecting or modifying its staged, unstaged, or untracked edits. Worker allocation verifies the same committed identity around worktree creation, including resumed waves; staged-dependent waves verify their clean integration snapshot. A dirty Main can therefore produce a checked retained candidate, but branch/HEAD drift stops new waves. The runner executes ready worker tasks concurrently, inspects clean committed candidates, runs preliminary task checks and optional preliminary judgment, then records ready candidates for Main. **It does not automatically integrate them.**
 
-The extension waits up to about 10 seconds for the shell of a new worker pane to finish startup before it starts Pi.
+The extension waits up to about 10 seconds for the shell of a new worker pane to finish startup. Then it waits up to about 20 more seconds for that shell to own the pane foreground, before the readiness probe and the Pi start.
 
 Main selects exact candidates through `subagent_stage` into an owned integration checkout in explicit order. Each stage is a committed merge of the candidate, not a mutation of Main. Conflicts retain the checkout for Main to resolve; `resolve` verifies the exact two-parent merge instead of replaying an uncertain merge. Main can explicitly run dependent tasks from an exact staged tip with `subagent_integrate advance` and stage their results afterward. Independent candidates may be staged without re-running workers.
 
@@ -396,13 +396,13 @@ If you removed resources outside Pi Subagent, abort can reconcile their absence.
 
 ### Recovery and state
 
-State version 5 lives privately under:
+State version 6 lives privately under:
 
 ```text
 <agent-dir>/config/pi-subagent/state/<repository-hash>/<request-id>.json
 ```
 
-Parsing rejects unknown properties, malformed evidence, invalid lineage, and v4 or older state without migration. Preserve old files and recover work manually. Writes are atomic. A productive lease prevents concurrent execution or resumption but permits status inspection and abort.
+Parsing rejects unknown properties, malformed evidence, invalid lineage, and v5 or older state without migration. Preserve old files and recover work manually. Writes are atomic. A productive lease prevents concurrent execution or resumption but permits status inspection and abort.
 
 `delegate_task`, `subagent_resume`, and `subagent_integrate advance` return a durable request ID after saving the wave. Work continues asynchronously. A saved worker attention state sends a follow-up to the launching session, including while siblings run. The wave also reports its final result.
 
@@ -600,4 +600,7 @@ Worktree finalization returns one of:
 - `retained`: exact commit and dirty measurements are known and work remains; or
 - `recovery`: cleanup or measurement needs deliberate action and reports only proved fields.
 
-No cleanup path uses `git clean`, force deletion, hidden fallback to Main, or deletion of unproved work. The one exception is user-confirmed discard: after the user selects **Close and delete worktrees (discard work)** in `/subagent` and confirms, it force-removes the reviewed owned worktrees.
+No cleanup path uses `git clean`, force deletion, hidden fallback to Main, or deletion of unproved work. There are two exceptions, and each needs user confirmation:
+
+- After the user selects **Close and delete worktrees (discard work)** in `/subagent` and confirms, the extension force-removes the reviewed owned worktrees.
+- After a separate confirmation in `/subagent prune`, the command force-removes the reviewed items that it marked as forceable.

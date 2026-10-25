@@ -53,7 +53,7 @@ Read every changelog section in `(BASE, TARGET]`, including `Breaking Changes`. 
 | `change` | Adapt to changed commands, output, or errors, or use a new Herdr feature to remove probes, retries, polling, or subprocesses. |
 | `none` | No consumer is affected. |
 
-Raise a consumer's minimum Herdr version only to adopt a feature or a required fix. Use the first version that provides it. Put the same version in the README and in any runtime check. As with a raised Pi floor, this is a minor release of the consumer. Choose version bumps with [the release runbook](../releasing.md).
+Raise a consumer's minimum Herdr version only to adopt a feature or a required fix. Use the first version that provides it. Put the same version in the README and in any runtime check. Also update `HERDR_CONSUMER_MIN_VERSION` and `HERDR_CONSUMER_PACKAGES` in `website/public/install.sh`, and update `website/scripts/installer.test.mjs`. As with a raised Pi floor, this is a minor release of the consumer. Choose version bumps with [the release runbook](../releasing.md).
 
 ## 4. Test the target
 
