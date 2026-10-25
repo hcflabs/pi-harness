@@ -40,6 +40,7 @@ _Avoid_: parse error
 
 **Review record**:
 Session-only metadata for the last Review. It contains time, the answering route model, failed route codes, duration, known USD cost, and the Verdict.
+The cost sums known, finite, non-negative response costs across failed and successful routes. The record omits cost when no route reports one.
 It contains no user prompt, Review text, Notes, or error message text.
 _Avoid_: Run record, transcript, log
 

@@ -337,6 +337,60 @@ test("without a task route the advisor warns with /task-models and does not use 
 	assert.equal(h.notifications[0]![1], "warning");
 });
 
+test("failed reviews retain only known finite non-negative costs", async () => {
+	for (const cost of [0.01, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+		const h = await enabled();
+		h.replies.push(async () => ({ stopReason: "length", errorMessage: "private error text",
+			content: [{ type: "text", text: "private review text" }], usage: { cost: { total: cost } } }));
+		await h.settle();
+		assert.equal(h.sent.length, 0);
+		await h.command("status");
+		const status = h.notifications.at(-1)![0];
+		assert.match(status, /Last review: \d{4}-\d\d-\d\dT.* · model none/);
+		assert.match(status, /Failed route openai\/advisor-model: Error/);
+		assert.match(status, /Verdict failed · duration \d+ ms/);
+		if (Number.isFinite(cost) && cost >= 0) assert.ok(status.includes(` · cost USD ${cost}`));
+		else assert.doesNotMatch(status, /cost USD/);
+		assert.doesNotMatch(status, /private|Fix the bug|step 1/);
+	}
+});
+
+test("status sums known costs from failed and successful review routes", async () => {
+	const configPath = join(agentDir, "config", "pi-task-models", "config.json");
+	const primary = { model: "openai/advisor-model", thinkingLevel: "off" };
+	writeFileSync(configPath, JSON.stringify({ profiles: { balanced: {
+		primary, fallback: { model: "openai/fallback-model", thinkingLevel: "off" },
+	} } }));
+	try {
+		for (const [failedCost, successCost, expected] of [
+			[0.01, 0.02, 0.03], [0.01, undefined, 0.01], [undefined, 0.02, 0.02],
+			[0, undefined, 0], [undefined, undefined, undefined],
+		]) {
+			const h = await enabled({ fallback: true });
+			h.replies.push(async () => ({ stopReason: "length", errorMessage: "private error text", content: [],
+				...(failedCost === undefined ? {} : { usage: { cost: { total: failedCost } } }) }));
+			h.replies.push(async () => ({ stopReason: "stop", content: [{ type: "text", text: "PASS" }],
+				...(successCost === undefined ? {} : { usage: { cost: { total: successCost } } }) }));
+			await h.settle();
+			await h.command("status");
+			const status = h.notifications.at(-1)![0];
+			assert.deepEqual(h.requestedModels, ["openai/advisor-model", "openai/fallback-model"]);
+			assert.match(status, /model openai\/fallback-model/);
+			assert.match(status, /Failed route openai\/advisor-model: Error/);
+			assert.match(status, /Verdict pass · duration \d+ ms/);
+			if (expected === undefined) assert.doesNotMatch(status, /cost USD/);
+			else {
+				const cost = status.match(/ · cost USD (\S+)/)?.[1];
+				assert.ok(cost !== undefined);
+				assert.ok(Math.abs(Number(cost) - expected) < 1e-12, status);
+			}
+			assert.doesNotMatch(status, /private|Fix the bug|step 1|PASS/);
+		}
+	} finally {
+		writeFileSync(configPath, JSON.stringify({ profiles: { balanced: { primary } } }));
+	}
+});
+
 test("status shows the answering route, safe failed routes, duration, and known cost", async () => {
 	const configPath = join(agentDir, "config", "pi-task-models", "config.json");
 	const primary = { model: "openai/advisor-model", thinkingLevel: "off" };
