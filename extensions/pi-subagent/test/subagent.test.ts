@@ -1100,7 +1100,7 @@ test("direct widget, follow-up and /subagent show the same saved reference, role
 	});
 });
 
-test("direct widget nests a multi-worker workflow under Main and a click focuses only a verified live worker", async () => {
+test("direct widget nests a multi-worker workflow under Main and a click focuses only a verified worker", async () => {
 	await environment(async (agentDir) => {
 		await writeWorkerRole(agentDir);
 		await herdrEnvironment(async (cwd) => {
@@ -1147,7 +1147,14 @@ test("direct widget nests a multi-worker workflow under Main and a click focuses
 			await waitFor(() => app.sentMessages.length === 1);
 			const done = app.widget!.render(120);
 			assert.equal(done[0], "Main · 2 complete");
-			assert.equal(click(2), undefined, "a finished worker is not a target");
+			// A finished worker keeps its Herdr tab, so its row stays a target after the identity check.
+			assert.deepEqual(click(2), { handled: true, render: false }, "a finished worker row is a target");
+			await waitFor(() => focusCalls() === 2);
+			assert.equal(fake.calls.filter(([kind, command]) => kind === "agent" && command === "focus").at(-1)![2], fake.calls.filter(([kind, command]) => kind === "agent" && command === "get").at(-1)![2]);
+			assert.equal(click(1), undefined, "a workflow row is still not a target");
+			app.handlers.get("input")?.({ source: "interactive" });
+			assert.deepEqual(app.widget!.render(120), [], "user input removes finished rows");
+			assert.equal(click(2), undefined, "a row removed after user input is not a target");
 		});
 	});
 });
