@@ -54,7 +54,7 @@ A Task Profile Model is a Pi virtual model, `task/<profile>`, for one Task Profi
 
 A tool continuation keeps the route of the previous response, so the prompt cache stays valid. A retry after a context overflow keeps the same route. Profile thinking is authoritative: the selected thinking level does not change the route.
 
-Pi retries only the errors that it classifies as retryable. A 400, 401, 404, or quota error ends the turn on the failed route. Pi waits between retries and uses `retry.maxRetries` from Pi settings. A Task Route cannot name a Task Profile Model.
+Pi retries only the errors that it classifies as retryable. A 400, 401, 404, or quota error ends the turn on the failed route. Pi waits between retries and uses `retry.maxRetries` from Pi settings. A Task Route cannot name a virtual model, for example a Task Profile Model or an `alias/<name>` model. The picker does not show virtual models, and the router skips a Task Route that names one.
 
 `@hcflabs/pi-subagent` gives a worker the Task Profile Model when its profile has two usable routes. The worker loads only `extensions/task-profile-models.ts`, because workers run with `--no-extensions`.
 
