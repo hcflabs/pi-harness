@@ -6,7 +6,7 @@ import test, { mock } from "node:test";
 import { SessionManager, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import advisorExtension, { BLOCKER_MESSAGE, ITEM_CAP, PROMPT_CAP, REPLY_CAP, RUN_CAP, parseReview, reviewInput, runEntries } from "../extensions/advisor.ts";
 
-type Response = { stopReason: string; errorMessage?: string; content: unknown[] };
+type Response = { stopReason: string; errorMessage?: string; content: unknown[]; usage?: { cost?: { total: number } } };
 type Reply = string | ((signal: AbortSignal) => Promise<Response>);
 
 const model = { provider: "openai", id: "advisor-model", input: ["text"], reasoning: false };
@@ -30,7 +30,7 @@ function deferred() {
 	return { reply, resolve: (text: string) => resolve({ stopReason: "stop", content: [{ type: "text", text }] }) };
 }
 
-function harness(options: { hasUI?: boolean; available?: unknown[] } = {}) {
+function harness(options: { hasUI?: boolean; available?: unknown[]; fallback?: boolean } = {}) {
 	const manager = SessionManager.inMemory("/repo");
 	const handlers = new Map<string, Function[]>();
 	let command!: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
@@ -39,13 +39,15 @@ function harness(options: { hasUI?: boolean; available?: unknown[] } = {}) {
 	const replies: Reply[] = [];
 	const sent: Array<{ message: { customType: string; content: string; display: boolean; details?: unknown }; options: unknown }> = [];
 	const state = { idle: true, status: undefined as string | undefined, editor: "" };
+	const requestedModels: string[] = [];
 	const host = {
 		cwd: "/repo", hasUI: options.hasUI ?? true, sessionManager: manager, model, scopedModels: [], isIdle: () => state.idle,
 		ui: { notify: (message: string, level: string) => notifications.push([message, level]), setStatus: (_key: string, value?: string) => { state.status = value; }, getEditorText: () => state.editor },
 		modelRegistry: {
-			getAvailable: () => options.available ?? [model],
-			streamSimple: (_model: unknown, context: never, streamOptions: { signal: AbortSignal }) => ({
+			getAvailable: () => options.available ?? [model, ...(options.fallback ? [{ ...model, id: "fallback-model" }] : [])],
+			streamSimple: (requested: { provider: string; id: string }, context: never, streamOptions: { signal: AbortSignal }) => ({
 				result: async () => {
+					requestedModels.push(`${requested.provider}/${requested.id}`);
 					requests.push({ context });
 					const reply = replies.shift() ?? "PASS";
 					return typeof reply === "string" ? { stopReason: "stop", content: [{ type: "text", text: reply }] } : reply(streamOptions.signal);
@@ -80,7 +82,7 @@ function harness(options: { hasUI?: boolean; available?: unknown[] } = {}) {
 		timestamp: Date.now(),
 	} as never);
 	return {
-		manager, notifications, requests, replies, sent, state, emit, customRun, assistant,
+		manager, notifications, requests, requestedModels, replies, sent, state, emit, customRun, assistant,
 		command: (args: string) => command(args, ctx as ExtensionCommandContext),
 		async prompt(text = "Fix the bug.") {
 			await emit("before_agent_start", { messageType: "user", prompt: text });
@@ -119,20 +121,20 @@ test("advisor is off by default, and /advisor on|off|status persists on the bran
 	await h.settle();
 	assert.equal(h.requests.length, 0);
 	await h.command("status");
-	assert.deepEqual(h.notifications.at(-1), ["Advisor is off on this branch.", "info"]);
+	assert.deepEqual(h.notifications.at(-1), ["Advisor is off on this branch.\nNo advisor review in this session.\nMalformed responses in this session: 0", "info"]);
 
 	const before = h.manager.getLeafId()!;
 	await h.command("on");
 	await h.command("status");
-	assert.deepEqual(h.notifications.at(-1), ["Advisor is on on this branch.", "info"]);
+	assert.deepEqual(h.notifications.at(-1), ["Advisor is on on this branch.\nNo advisor review in this session.\nMalformed responses in this session: 0", "info"]);
 	h.manager.branch(before);
 	await h.command("status");
-	assert.deepEqual(h.notifications.at(-1), ["Advisor is off on this branch.", "info"], "state follows the branch");
+	assert.deepEqual(h.notifications.at(-1), ["Advisor is off on this branch.\nNo advisor review in this session.\nMalformed responses in this session: 0", "info"], "state follows the branch");
 
 	await h.command("on");
 	await h.command("off");
 	await h.command("status");
-	assert.deepEqual(h.notifications.at(-1), ["Advisor is off on this branch.", "info"]);
+	assert.deepEqual(h.notifications.at(-1), ["Advisor is off on this branch.\nNo advisor review in this session.\nMalformed responses in this session: 0", "info"]);
 	await h.command("maybe");
 	assert.deepEqual(h.notifications.at(-1), ["Usage: /advisor on|off|status", "error"]);
 });
@@ -257,6 +259,9 @@ test("a reply is dropped when the leaf changes, input arrives, or Pi is busy bef
 		assert.deepEqual(h.notifications, [], interrupt);
 		assert.equal(h.sent.length, 0, interrupt);
 		assert.equal(h.state.status, undefined, interrupt);
+		await h.command("status");
+		assert.match(h.notifications.at(-1)![0], interrupt === "input" ? /Verdict aborted/ : /Verdict discarded/);
+		assert.doesNotMatch(h.notifications.at(-1)![0], /Tests were not run/);
 	}
 });
 
@@ -284,6 +289,10 @@ test("a cancelled review is silent; a timeout or model error warns and does not 
 		await timed.settle();
 		assert.deepEqual(timed.notifications, [["Advisor review timed out after 90 seconds.", "warning"]]);
 		assert.equal(timed.state.status, undefined);
+		await timed.command("status");
+		assert.match(timed.notifications.at(-1)![0], /Verdict aborted/);
+		assert.match(timed.notifications.at(-1)![0], /Failed route openai\/advisor-model: TimeoutError/);
+		assert.doesNotMatch(timed.notifications.at(-1)![0], /timed out/);
 	} finally {
 		mock.restoreAll();
 	}
@@ -293,6 +302,11 @@ test("a cancelled review is silent; a timeout or model error warns and does not 
 	await failed.settle();
 	assert.deepEqual(failed.notifications, [["Advisor review failed: rate limited", "warning"]]);
 	assert.equal(failed.sent.length, 0);
+	await failed.command("status");
+	assert.match(failed.notifications.at(-1)![0], /model none/);
+	assert.match(failed.notifications.at(-1)![0], /Failed route openai\/advisor-model: Error/);
+	assert.match(failed.notifications.at(-1)![0], /Verdict failed/);
+	assert.doesNotMatch(failed.notifications.at(-1)![0], /rate limited|cost USD/);
 });
 
 test("a malformed reply warns once and does nothing else", async () => {
@@ -304,6 +318,14 @@ test("a malformed reply warns once and does nothing else", async () => {
 	await h.settle();
 	assert.deepEqual(h.notifications, [["Advisor reply did not follow the output contract and was ignored.", "warning"]]);
 	assert.equal(h.sent.length, 0);
+	await h.command("status");
+	assert.match(h.notifications.at(-1)![0], /Verdict malformed/);
+	assert.match(h.notifications.at(-1)![0], /Malformed responses in this session: 2/);
+	assert.doesNotMatch(h.notifications.at(-1)![0], /Looks good|BLOCKER/);
+	await h.emit("session_start");
+	await h.command("status");
+	assert.match(h.notifications.at(-1)![0], /No advisor review in this session/);
+	assert.match(h.notifications.at(-1)![0], /Malformed responses in this session: 0/);
 });
 
 test("without a task route the advisor warns with /task-models and does not use the session model", async () => {
@@ -313,6 +335,64 @@ test("without a task route the advisor warns with /task-models and does not use 
 	assert.equal(h.notifications.length, 1);
 	assert.match(h.notifications[0]![0], /^Advisor review skipped: .*Run \/task-models\.$/);
 	assert.equal(h.notifications[0]![1], "warning");
+});
+
+test("status shows the answering route, safe failed routes, duration, and known cost", async () => {
+	const configPath = join(agentDir, "config", "pi-task-models", "config.json");
+	const primary = { model: "openai/advisor-model", thinkingLevel: "off" };
+	writeFileSync(configPath, JSON.stringify({ profiles: { balanced: {
+		primary, fallback: { model: "openai/fallback-model", thinkingLevel: "off" },
+	} } }));
+	try {
+		const h = await enabled({ fallback: true });
+		h.replies.push(async () => { throw Object.assign(new Error("private error text"), { status: 429 }); });
+		h.replies.push(async () => ({ stopReason: "stop", content: [{ type: "text", text: "concern: Private finding. Evidence: private evidence" }],
+			usage: { cost: { total: 0.0025 } } }));
+		await h.settle();
+		await h.command("status");
+		const status = h.notifications.at(-1)![0];
+		assert.deepEqual(h.requestedModels, ["openai/advisor-model", "openai/fallback-model"]);
+		assert.match(status, /Advisor is on on this branch/);
+		assert.match(status, /Last review: \d{4}-\d\d-\d\dT.* · model openai\/fallback-model/);
+		assert.match(status, /Failed route openai\/advisor-model: http-429/);
+		assert.match(status, /Verdict concern · duration \d+ ms · cost USD 0.0025/);
+		assert.doesNotMatch(status, /Private|private|Fix the bug|step 1/);
+		await h.prompt();
+		h.work();
+		await h.settle();
+		await h.command("status");
+		assert.match(h.notifications.at(-1)![0], /Verdict pass/);
+		assert.doesNotMatch(h.notifications.at(-1)![0], /cost USD|Failed route/);
+	} finally {
+		writeFileSync(configPath, JSON.stringify({ profiles: { balanced: { primary } } }));
+	}
+});
+
+test("status writes to stdout without UI", async () => {
+	const h = harness({ hasUI: false });
+	let output = "";
+	const stdout = mock.method(process.stdout, "write", (text: string) => { output += text; return true; });
+	try {
+		await h.command("status");
+		assert.equal(output, "Advisor is off on this branch.\nNo advisor review in this session.\nMalformed responses in this session: 0\n");
+		assert.deepEqual(h.notifications, []);
+	} finally {
+		stdout.mock.restore();
+	}
+});
+
+test("status uses the strongest delivered grade, including a held blocker", async () => {
+	for (const [reply, verdict] of [["PASS", "pass"], ["nit: Private. Evidence: private", "nit"], [BLOCKER, "blocker"]]) {
+		const h = await enabled();
+		h.state.editor = "draft";
+		h.replies.push(reply);
+		await h.settle();
+		await h.command("off");
+		await h.command("status");
+		assert.match(h.notifications.at(-1)![0], /Advisor is off on this branch/);
+		assert.match(h.notifications.at(-1)![0], new RegExp(`Verdict ${verdict}`));
+		assert.doesNotMatch(h.notifications.at(-1)![0], /Private|Tests were not run|cost USD/);
+	}
 });
 
 test("parseReview accepts only PASS or graded lines with a finding and evidence", () => {
