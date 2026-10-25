@@ -16,7 +16,6 @@ pi install npm:@hcflabs/pi-task-models
 | Package | Relationship | Purpose |
 | --- | --- | --- |
 | [`@hcflabs/pi-auto-compact`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-auto-compact) | Consumer | Compaction defaults to `fast`. |
-| [`@hcflabs/pi-cron`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-cron) | Consumer | Scheduled jobs default to `fast`. |
 | [`@hcflabs/pi-herdr-tools`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-herdr-tools) | Consumer | Side-thread and rename tasks default to `fast`. |
 | [`@hcflabs/pi-memory`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-memory) | Consumer | Candidate review, `/remember` preparation, and `/dream` promotion default to `balanced`. |
 | [`@hcflabs/pi-multi-codex`](https://github.com/hcflabs/pi-harness/tree/main/extensions/pi-multi-codex) | Improves | Numbered Codex slots become one route. |

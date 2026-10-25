@@ -30,8 +30,7 @@
       "./extensions/pi-memory/extensions/memory.ts",
       "./extensions/pi-undo/extensions/undo.ts",
       "./extensions/pi-goal/extensions/goal.ts",
-      "./extensions/pi-advisor/extensions/advisor.ts",
-      "./extensions/pi-cron/extensions/cron.ts"
+      "./extensions/pi-advisor/extensions/advisor.ts"
     ]
   },
   "scripts": {

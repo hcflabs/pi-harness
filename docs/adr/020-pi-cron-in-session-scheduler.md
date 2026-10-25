@@ -1,6 +1,6 @@
 # 020. pi-cron In-Session Scheduler
 
-- **Status:** accepted
+- **Status:** retired (2026-10-24): the repository removed @hcflabs/pi-cron because it had no users.
 - **Date:** 2026-10-03
 
 ## Context
