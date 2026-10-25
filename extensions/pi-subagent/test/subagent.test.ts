@@ -1131,7 +1131,14 @@ test("direct widget nests a multi-worker workflow under Main and a click focuses
 			assert.equal(click(0), undefined, "the header is not a target");
 			assert.equal(click(1), undefined, "a workflow row is not a target");
 			assert.equal(click(2, 5, 80), undefined, "a click for an older render width is ignored");
-			assert.deepEqual(click(3), { handled: true, render: false });
+			// The second worker gets its focus handle after its prompt call. Render again until the row is a target.
+			let clicked: ReturnType<typeof click>;
+			await waitFor(() => {
+				app.widget!.render(120);
+				clicked = click(3);
+				return clicked !== undefined;
+			});
+			assert.deepEqual(clicked, { handled: true, render: false });
 			await waitFor(() => fake.calls.some(([kind, command]) => kind === "agent" && command === "focus"));
 			const pane = fake.calls.find(([kind, command]) => kind === "agent" && command === "focus")![2];
 			const get = fake.calls.findIndex(([kind, command, target]) => kind === "agent" && command === "get" && target === pane);
