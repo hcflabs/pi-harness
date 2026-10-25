@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 export interface AddedDir {
 	absolutePath: string;
@@ -17,6 +18,10 @@ export interface DirContext {
 const CONTEXT_FILES = ["AGENTS.md", "CLAUDE.md"] as const;
 const SKILL_DIRS = [".pi/skills", ".agents/skills", ".claude/skills"] as const;
 const SKIPPED_SEARCH_DIRS = new Set([".git", "node_modules"]);
+export const CONTEXT_FILE_BYTE_CAP = 65_536;
+
+type ContextFileReader = (filePath: string) => string | null;
+type ContextFileStat = (filePath: string) => { size: number; mtimeMs: number; ctimeMs: number };
 
 export function isMissingPathError(error: unknown): boolean {
 	if (!error || typeof error !== "object" || !("code" in error)) return false;
@@ -49,18 +54,40 @@ export function dirExists(dir: string): boolean {
 	}
 }
 
-function readFileSafe(filePath: string): string | null {
+export function readFileSafe(filePath: string): string | null {
 	try {
-		return readFileSync(filePath, "utf8");
+		const fd = openSync(filePath, "r");
+		try {
+			const buffer = Buffer.alloc(CONTEXT_FILE_BYTE_CAP);
+			let bytesRead = 0;
+			while (bytesRead < buffer.length) {
+				const count = readSync(fd, buffer, bytesRead, buffer.length - bytesRead, null);
+				if (count === 0) break;
+				bytesRead += count;
+			}
+			const bytes = buffer.subarray(0, bytesRead);
+			if (fstatSync(fd).size <= bytesRead) return bytes.toString("utf8");
+			// The decoder excludes an incomplete UTF-8 character at the cap.
+			const text = new StringDecoder("utf8").write(bytes);
+			return `${text}\n\n[pi-add-dir truncated ${filePath} at the 64 KiB (65536 bytes) cap.]`;
+		} finally {
+			closeSync(fd);
+		}
 	} catch {
 		return null;
 	}
 }
 
-function readContextFile(dir: string, name: (typeof CONTEXT_FILES)[number]): string | null {
-	const contents = [readFileSafe(path.join(dir, name)), readFileSafe(path.join(dir, ".pi", name))].filter(
-		(content): content is string => content !== null,
-	);
+function contextFilePaths(dir: string, name: (typeof CONTEXT_FILES)[number]): string[] {
+	return [path.join(dir, name), path.join(dir, ".pi", name)];
+}
+
+function readContextFile(
+	dir: string,
+	name: (typeof CONTEXT_FILES)[number],
+	readFile: ContextFileReader = readFileSafe,
+): string | null {
+	const contents = contextFilePaths(dir, name).map(readFile).filter((content): content is string => content !== null);
 	return contents.length > 0 ? contents.join("\n\n") : null;
 }
 
@@ -112,7 +139,7 @@ export function collectSkillPaths(dirs: AddedDir[]): string[] {
 	return paths;
 }
 
-export function buildContextInjection(dirs: AddedDir[]): string {
+export function buildContextInjection(dirs: AddedDir[], readFile: ContextFileReader = readFileSafe): string {
 	const sections = [
 		"\n\n## External Directories (added via pi-add-dir)",
 		`\nThe following ${dirs.length} external director${dirs.length === 1 ? "y is" : "ies are"} included in this session. You can read, edit, and write files in these directories using absolute paths.\n`,
@@ -121,13 +148,65 @@ export function buildContextInjection(dirs: AddedDir[]): string {
 	for (const dir of dirs) {
 		sections.push(`### ${dir.label} - \`${dir.absolutePath}\``);
 
-		const agentsMd = readContextFile(dir.absolutePath, "AGENTS.md");
+		const agentsMd = readContextFile(dir.absolutePath, "AGENTS.md", readFile);
 		if (agentsMd) sections.push(`\n#### AGENTS.md (from ${dir.label})\n${agentsMd}`);
-		const claudeMd = readContextFile(dir.absolutePath, "CLAUDE.md");
+		const claudeMd = readContextFile(dir.absolutePath, "CLAUDE.md", readFile);
 		if (claudeMd) sections.push(`\n#### CLAUDE.md (from ${dir.label})\n${claudeMd}`);
 	}
 
 	return sections.join("\n");
+}
+
+export function createContextInjectionCache(
+	options: { readFile?: ContextFileReader; statFile?: ContextFileStat } = {},
+): (dirs: AddedDir[]) => string {
+	const readFile = options.readFile ?? readFileSafe;
+	const statFile = options.statFile ?? statSync;
+	let cached: { key: string; injection: string } | undefined;
+
+	function fingerprint(dirs: AddedDir[]): string | undefined {
+		try {
+			const inputs = dirs.map(({ absolutePath, label }) => ({
+				absolutePath,
+				label,
+				files: CONTEXT_FILES.flatMap((name) => contextFilePaths(absolutePath, name)).map((filePath) => {
+					try {
+						const { size, mtimeMs, ctimeMs } = statFile(filePath);
+						return `${size}:${mtimeMs}:${ctimeMs}`;
+					} catch (error) {
+						if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return "missing";
+						throw error;
+					}
+				}),
+			}));
+			// Skills do not affect the injection. Pi discovers them separately.
+			return JSON.stringify(inputs);
+		} catch {
+			// Other stat errors bypass the cache.
+			return undefined;
+		}
+	}
+
+	return (dirs) => {
+		const key = fingerprint(dirs);
+		if (key !== undefined && cached?.key === key) return cached.injection;
+		let readFailed = false;
+		const injection = buildContextInjection(dirs, (filePath) => {
+			const content = readFile(filePath);
+			if (content === null) {
+				try {
+					statFile(filePath);
+					readFailed = true;
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") readFailed = true;
+				}
+			}
+			return content;
+		});
+		// Do not cache failed reads or files that changed during the build.
+		cached = key !== undefined && !readFailed && fingerprint(dirs) === key ? { key, injection } : undefined;
+		return injection;
+	};
 }
 
 function normalizePattern(pattern: string): string {

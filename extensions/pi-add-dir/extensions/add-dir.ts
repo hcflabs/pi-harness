@@ -12,7 +12,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { recordDiagnostic, registerConfigReporting, registerDiagnosticsCommand } from "@hcflabs/pi-config-store";
 import { Type } from "typebox";
 import {
-	buildContextInjection,
+	createContextInjectionCache,
 	collectSkillPaths,
 	dirExists,
 	findFiles,
@@ -228,6 +228,7 @@ export default function addDirExtension(pi: ExtensionAPI, options: ExtensionOpti
 	let managedDirs: ScopedDir[] = [];
 	let addedDirs: ScopedDir[] = [];
 	let currentCwd = "";
+	const contextInjection = createContextInjectionCache();
 
 	// No field disables this config, so a load always has a value; bad entries are dropped and reported at launch.
 	function loadGlobalPaths(): string[] {
@@ -521,7 +522,7 @@ export default function addDirExtension(pi: ExtensionAPI, options: ExtensionOpti
 
 	pi.on("before_agent_start", (event) => {
 		if (addedDirs.length === 0) return;
-		event.systemPromptOptions.sections[PROMPT_SECTION] = buildContextInjection(addedDirs);
+		event.systemPromptOptions.sections[PROMPT_SECTION] = contextInjection(addedDirs);
 	});
 
 	pi.registerCommand("dir-reload", {
