@@ -395,21 +395,35 @@ function singleLine(text: string): string {
 	return text.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").trim();
 }
 
+function attemptFailureOutcome(error: unknown): "failed" | "aborted" {
+	try {
+		return error instanceof Error && error.name === "AbortError" ? "aborted" : "failed";
+	} catch {
+		return "failed";
+	}
+}
+
 function attemptError(error: unknown): { errorCode: string } {
-	const fields = error && typeof error === "object" ? error as Record<string, unknown> : {};
-	for (const code of [fields.taskRouteCode, fields.code]) {
-		if (typeof code !== "string") continue;
-		const bounded = singleLine(code).slice(0, 64);
-		if (bounded) return { errorCode: bounded };
+	try {
+		const fields = error && typeof error === "object" ? error as Record<string, unknown> : {};
+		for (const key of ["taskRouteCode", "code"]) {
+			const code = fields[key];
+			if (typeof code !== "string") continue;
+			const bounded = singleLine(code).slice(0, 64);
+			if (bounded) return { errorCode: bounded };
+		}
+		const status = fields.status;
+		if (typeof status === "number" && Number.isFinite(status)) {
+			return { errorCode: `http-${status}` };
+		}
+		const name = fields.name;
+		if (typeof name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(name)) {
+			return { errorCode: name };
+		}
+	} catch {
+		// Error metadata must not prevent an attempt record.
 	}
-	if (typeof fields.status === "number" && Number.isFinite(fields.status)) {
-		return { errorCode: `http-${fields.status}` };
-	}
-	return {
-		errorCode: typeof fields.name === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(fields.name)
-			? fields.name
-			: "error",
-	};
+	return { errorCode: "error" };
 }
 
 /** Observer failures do not change route results. The executor does not await observer promises. */
@@ -446,7 +460,7 @@ export async function executeTaskRoutes<T>(
 			report("succeeded");
 			return result;
 		} catch (error) {
-			report(signal?.aborted || (error instanceof Error && error.name === "AbortError") ? "aborted" : "failed", error);
+			report(signal?.aborted ? "aborted" : attemptFailureOutcome(error), error);
 			if (routeIndex === routes.length - 1 || signal?.aborted || !shouldFallback(error)) throw error;
 		}
 	}

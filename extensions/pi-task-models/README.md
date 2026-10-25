@@ -166,6 +166,8 @@ The executor selects `errorCode` in this order:
 4. Use `error.name` only if it matches `/^[A-Za-z][A-Za-z0-9_]{0,63}$/`.
 5. Use `error` otherwise.
 
+If error metadata access throws, the record uses `errorCode: "error"`. If abort classification fails, the outcome is `failed` unless the signal is aborted. These failures do not change the route result or fallback decision.
+
 Successful records omit `errorCode`. The observer can return a promise, but execution does not wait for it. The executor catches and ignores observer failures. Observer failures do not change route results or fallback decisions.
 
 ## Limits and recovery

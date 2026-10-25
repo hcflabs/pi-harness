@@ -993,6 +993,62 @@ test("never copies error message text or thrown strings into route records", asy
 	}
 });
 
+test("preserves route errors and fallback when an Error name getter throws, with or without an observer", async () => {
+	const failure = new Error("private route failure");
+	Object.defineProperty(failure, "name", { get() { throw new Error("private getter failure"); } });
+	for (const observe of [false, true]) {
+		for (const [routes, fallback, succeeds] of [
+			[EXECUTION_ROUTES, true, true],
+			[EXECUTION_ROUTES, false, false],
+			[EXECUTION_ROUTES, true, false],
+			[EXECUTION_ROUTES.slice(0, 1), true, false],
+		] as const) {
+			const records: TaskRouteAttempt[] = [];
+			const attempts: string[] = [];
+			let fallbackChecks = 0;
+			const result = executeTaskRoutes(routes, async (route) => {
+				attempts.push(route.model.id);
+				if (succeeds && route.model.id === "fallback") return "fallback";
+				throw failure;
+			}, {
+				shouldFallback(error) {
+					assert.equal(error, failure);
+					fallbackChecks++;
+					return fallback;
+				},
+				onAttempt: observe ? (record) => { records.push(record); } : undefined,
+			});
+			if (succeeds) assert.equal(await result, "fallback");
+			else await assert.rejects(result, (error) => error === failure);
+			assert.deepEqual(attempts, fallback && routes.length > 1 ? ["primary", "fallback"] : ["primary"]);
+			assert.equal(fallbackChecks, routes.length > 1 ? 1 : 0);
+			assert.deepEqual(records.map(({ durationMs, ...record }) => record), observe ? attempts.map((model, routeIndex) => ({
+				routeIndex,
+				model: `test/${model}`,
+				outcome: succeeds && routeIndex === 1 ? "succeeded" : "failed",
+				...(succeeds && routeIndex === 1 ? {} : { errorCode: "error" }),
+			})) : []);
+			assert.doesNotMatch(JSON.stringify(records), /private/);
+		}
+	}
+});
+
+test("reports a generic error code when error metadata getters throw", async () => {
+	for (const field of ["taskRouteCode", "code", "status", "name"]) {
+		const failure = Object.defineProperty({}, field, { get() { throw new Error("private getter failure"); } });
+		const records: TaskRouteAttempt[] = [];
+		await assert.rejects(executeTaskRoutes(EXECUTION_ROUTES.slice(0, 1), async () => { throw failure; }, {
+			shouldFallback: () => assert.fail("the last route must not check fallback"),
+			onAttempt(record) { records.push(record); },
+		}), (error) => error === failure);
+		assert.equal(records.length, 1);
+		assert.equal(records[0]!.outcome, "failed");
+		assert.equal(records[0]!.errorCode, "error");
+		assert.ok(Object.isFrozen(records[0]));
+		assert.doesNotMatch(JSON.stringify(records), /private/);
+	}
+});
+
 test("ignores synchronous and asynchronous observer failures without changing route results", async () => {
 	for (const onAttempt of [
 		() => { throw new Error("observer failed"); },
