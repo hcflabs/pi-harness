@@ -74,28 +74,6 @@ importers:
         specifier: 1.3.0
         version: 1.3.0
 
-  extensions/pi-cron:
-    dependencies:
-      '@hcflabs/pi-config-store':
-        specifier: ^4.0.0
-        version: link:../../packages/pi-config-store
-      '@hcflabs/pi-subagent':
-        specifier: ^27.2.0 || ^28.0.0
-        version: link:../pi-subagent
-      '@hcflabs/pi-task-models':
-        specifier: ^9.0.0
-        version: link:../pi-task-models
-      proper-lockfile:
-        specifier: ^4.1.2
-        version: 4.1.2
-    devDependencies:
-      '@earendil-works/pi-coding-agent':
-        specifier: 1.3.0
-        version: 1.3.0
-      '@types/proper-lockfile':
-        specifier: ^4.1.4
-        version: 4.1.4
-
   extensions/pi-deps:
     devDependencies:
       '@earendil-works/pi-coding-agent':

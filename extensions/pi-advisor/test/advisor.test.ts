@@ -180,7 +180,7 @@ test("a later tool-free run started by a custom message makes no new review", as
 	const h = await enabled();
 	await h.settle();
 	assert.equal(h.requests.length, 1);
-	await h.customRun("pi-cron-run", "Report the status.");
+	await h.customRun("scheduled-run", "Report the status.");
 	h.assistant([{ type: "text", text: "All good." }]);
 	await h.settle();
 	assert.equal(h.requests.length, 1);
@@ -332,7 +332,7 @@ test("review input keeps the newest material of the current run within the caps"
 	const start = h.manager.getLeafId();
 	h.manager.appendMessage({ role: "user", content: [{ type: "text", text: "p".repeat(PROMPT_CAP + 100) }], timestamp: Date.now() });
 	// A custom message that steers the run is part of the run record.
-	h.manager.appendCustomMessageEntry("pi-cron-run", [{ type: "text", text: "Run the nightly report." }], false);
+	h.manager.appendCustomMessageEntry("scheduled-run", [{ type: "text", text: "Run the nightly report." }], false);
 	for (let step = 0; step < 30; step++) h.work(`${step}:`.padEnd(ITEM_CAP + 500, "x"));
 	const branch = h.manager.getBranch();
 	const input = reviewInput(branch, runEntries(branch, start)!)!;
@@ -346,9 +346,9 @@ test("review input keeps the newest material of the current run within the caps"
 	const short = harness();
 	const shortStart = short.manager.getLeafId();
 	short.manager.appendMessage({ role: "user", content: [{ type: "text", text: "Go." }], timestamp: Date.now() });
-	short.manager.appendCustomMessageEntry("pi-cron-run", [{ type: "text", text: "Run the nightly report." }], false);
+	short.manager.appendCustomMessageEntry("scheduled-run", [{ type: "text", text: "Run the nightly report." }], false);
 	short.work();
 	const shortBranch = short.manager.getBranch();
-	assert.match(reviewInput(shortBranch, runEntries(shortBranch, shortStart)!)!, /Message pi-cron-run: Run the nightly report\.\n\nTool call bash/);
+	assert.match(reviewInput(shortBranch, runEntries(shortBranch, shortStart)!)!, /Message scheduled-run: Run the nightly report\.\n\nTool call bash/);
 	assert.equal(runEntries(shortBranch, "missing"), undefined);
 });

@@ -12,7 +12,6 @@ Each context defines package-specific language and its boundary. Contexts are ad
 | `pi-auto-compact` | [Pi Auto Compact](extensions/pi-auto-compact/CONTEXT.md) | Read trim, summary compaction, and emergency task resumption |
 | `pi-codegraph` | [Pi CodeGraph](extensions/pi-codegraph/CONTEXT.md) | Separate checkout indexes, seed indexes, and indexing consent |
 | `pi-config-store` | [Pi Config Store](packages/pi-config-store/CONTEXT.md) | Extension Config Homes, config issues, and safe replacement |
-| `pi-cron` | [Pi Cron](extensions/pi-cron/CONTEXT.md) | Scheduled jobs, slots, claims, and run delivery |
 | `pi-deps` | [Pi Deps](extensions/pi-deps/CONTEXT.md) | Repository opt-in and dependency preparation for new worktrees |
 | `pi-footer` | [Pi Footer](extensions/pi-footer/CONTEXT.md) | Checkout identity, usage, work time, status, and opening the current directory |
 | `pi-goal` | [Pi Goal](extensions/pi-goal/CONTEXT.md) | Branch-derived Goals, Evidence-based completion, Continuation limits, and Budget |
@@ -36,8 +35,7 @@ Arrows mean that the first context uses a capability owned by the second, unless
 
 | Contexts | Boundary and evidence |
 | --- | --- |
-| `pi-advisor`, `pi-auto-compact`, `pi-cron`, `pi-herdr-tools`, `pi-memory`, `pi-prompt-creator`, `pi-subagent` → `pi-task-models` | Consumers declare their own Model Tasks and use shared Task Profiles. Pi remains the model authority; see [ADR 017](docs/adr/017-consumer-owned-task-model-routing.md). |
-| `pi-cron` → `pi-subagent` | Scheduled jobs use Role launch policy and the bounded executor, not direct shared-checkout delegation or checked integration; see [ADR 020](docs/adr/020-pi-cron-in-session-scheduler.md). |
+| `pi-advisor`, `pi-auto-compact`, `pi-herdr-tools`, `pi-memory`, `pi-prompt-creator`, `pi-subagent` → `pi-task-models` | Consumers declare their own Model Tasks and use shared Task Profiles. Pi remains the model authority; see [ADR 017](docs/adr/017-consumer-owned-task-model-routing.md). |
 | `pi-prompt-creator` → `pi-subagent` | Prompt analysis uses the bounded executor for a tool-free child, not a Role changeset; see [prompt analysis](extensions/pi-prompt-creator/README.md#analysis). |
 | `pi-herdr-tools`, `pi-subagent` → `pi-herdr` | The shared package supplies Herdr access. Consumers retain conversation and worker workflow ownership; see [ADR 002](docs/adr/002-shared-herdr-cli-client.md). |
 | `pi-memory` → `pi-ask-question` | Memory conflict resolution uses the shared question UI; see [candidate review](extensions/pi-memory/README.md#candidate-review). |
