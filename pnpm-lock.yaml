@@ -109,7 +109,7 @@ importers:
         specifier: ^4.0.0
         version: link:../../packages/pi-config-store
       '@hcflabs/pi-herdr':
-        specifier: ^0.6.0
+        specifier: ^0.7.0
         version: link:../../packages/pi-herdr
       '@hcflabs/pi-process':
         specifier: ^0.3.0
@@ -219,7 +219,7 @@ importers:
         specifier: ^4.0.0
         version: link:../../packages/pi-config-store
       '@hcflabs/pi-herdr':
-        specifier: ^0.6.0
+        specifier: ^0.7.0
         version: link:../../packages/pi-herdr
       '@hcflabs/pi-process':
         specifier: ^0.3.0
