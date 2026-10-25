@@ -71,6 +71,8 @@ export async function toggleDependencyHook(
 const statusKey = "pi-deps";
 const pollMs = 500;
 const waitTimeoutMs = 10 * 60_000;
+// The watcher accepts this many consecutive parse errors before it stops.
+const maxParseFailures = 3;
 const spinnerIntervalMs = 100;
 const spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -97,12 +99,25 @@ async function watchDependencyInstallation(
 	if (git.code !== 0 || git.killed) return;
 	const stateDir = join(git.stdout.trim(), "pi-deps");
 	const statusPath = join(stateDir, "status.json");
+	let parseFailures = 0;
+	// The "unreadable" state is local to the watcher. Its message holds the error code.
 	const readStatus = async (): Promise<InstallStatus | undefined> => {
+		let text: string;
 		try {
-			return JSON.parse(await readFile(statusPath, "utf8")) as InstallStatus;
+			text = await readFile(statusPath, "utf8");
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-			return { state: "running" }; // partial write from installer or test; retry next poll
+			const code = (error as NodeJS.ErrnoException).code;
+			if (code === "ENOENT") return undefined;
+			return { state: "unreadable", message: code ?? "unknown error" };
+		}
+		try {
+			const status = JSON.parse(text) as InstallStatus;
+			parseFailures = 0;
+			return status;
+		} catch {
+			// A parse error can come from a partial write. Retry it for a short bound only.
+			parseFailures++;
+			return parseFailures < maxParseFailures ? { state: "running" } : { state: "unreadable", message: "SyntaxError" };
 		}
 	};
 
@@ -128,6 +143,11 @@ async function watchDependencyInstallation(
 			if (!status) return;
 		}
 		signal.throwIfAborted();
+		if (status.state === "unreadable") {
+			// Keep the file so that the user can examine it.
+			ctx.ui.setWidget(statusKey, [`pi-deps: cannot read status file ${statusPath}: ${status.message}`]);
+			return;
+		}
 		await rm(statusPath, { force: true }); // consume so later sessions do not replay a stale outcome
 		if (status.state === "error" || status.state === "running") {
 			ctx.ui.setWidget(statusKey, [
