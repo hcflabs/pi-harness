@@ -2604,6 +2604,79 @@ test("termination reconciliation proves exact active or absent worker state", as
 	}
 });
 
+test("settled worker inspection requires a stop Final turn on the exact latest prompt", async (t) => {
+	const userEntry = (id: string, parentId: string | null, text: string) => JSON.stringify({
+		type: "message", id, parentId, message: { role: "user", content: [{ type: "text", text }] },
+	});
+	const assistantEntry = (id: string, parentId: string, stopReason: string) => JSON.stringify({
+		type: "message", id, parentId, message: { role: "assistant", stopReason, content: [{ type: "text", text: "Committed." }] },
+	});
+	const latest = `Correct the task.\n\nTurn identity: ${TOKEN}:2`;
+	const cases: Array<{
+		name: string;
+		status?: string;
+		agent?: Record<string, unknown>;
+		session?: string[];
+		privateLease?: boolean;
+		expected: "settled" | "active" | "unknown";
+		failure?: RegExp;
+	}> = [
+		{ name: "stop turn with the matching identity", expected: "settled",
+			session: [userEntry("user-one", null, latest), assistantEntry("answer-one", "user-one", "stop")] },
+		{ name: "later user turn", expected: "unknown", failure: /unexpected user turn/,
+			session: [userEntry("user-one", null, latest), assistantEntry("answer-one", "user-one", "stop"),
+				userEntry("user-two", "answer-one", "Another instruction.")] },
+		{ name: "confirmed error Final turn", expected: "unknown", failure: /stop reason "error"/,
+			session: [userEntry("user-one", null, latest), assistantEntry("answer-one", "user-one", "error")] },
+		{ name: "stop turn of an earlier prompt only", expected: "active", failure: /no entry for the latest worker prompt/,
+			session: [userEntry("user-one", null, `Do the task.\n\nTurn identity: ${TOKEN}:1`), assistantEntry("answer-one", "user-one", "stop")] },
+		{ name: "latest prompt without a Final turn", expected: "active", failure: /no Final turn yet/,
+			session: [userEntry("user-one", null, latest)] },
+		{ name: "working agent", status: "working", expected: "active", failure: /not settled: working/ },
+		{ name: "pane mismatch", agent: { pane_id: "pane-other" }, expected: "unknown", failure: /does not match the exact saved worker/ },
+		{ name: "non-private lease", privateLease: false, expected: "unknown" },
+	];
+	for (const item of cases) await t.test(item.name, async (t) => {
+		const fixture = await paths(t);
+		const script = new ScriptedProcess();
+		const host = runtime(fixture, script);
+		const { attempt, leasePath } = await fullAttempt(fixture, host, script);
+		attempt.prompts.push(
+			{ kind: "initial", status: "settled", preCandidate: baseIdentity(), failure: "blocked", at: 1 },
+			{ kind: "correction", status: "settled", preCandidate: baseIdentity(), failure: "blocked", at: 2 },
+		);
+		await privateLease(leasePath);
+		if (item.privateLease === false) await chmod(leasePath, 0o644);
+		if (item.session) await writeFile(`${leasePath}.session.jsonl`, `${item.session.join("\n")}\n`, { mode: 0o600 });
+		if (item.privateLease !== false) {
+			script.push({
+				command: "herdr",
+				args: (args) => assert.deepEqual(args.slice(0, 3), ["agent", "wait", AGENT_NAME]),
+				result: success({ type: "agent_info", agent: agentInfo(item.status ?? "done", true, { cwd: fixture.worktree, ...item.agent }) }),
+			});
+		}
+
+		const result = await host.inspectSettledWorker({ task, attempt, workerId: AGENT_NAME }, context());
+
+		assert.equal(result.outcome, item.expected);
+		if (item.failure) assert.match(result.outcome === "settled" ? "" : result.failure, item.failure);
+		assert.equal(script.calls.filter(({ args }) => args[1] === "prompt").length, 0);
+		script.done();
+	});
+
+	await t.test("another worker ID", async (t) => {
+		const fixture = await paths(t);
+		const script = new ScriptedProcess();
+		const host = runtime(fixture, script);
+		const { attempt, leasePath } = await fullAttempt(fixture, host, script);
+		attempt.prompts.push({ kind: "initial", status: "settled", preCandidate: baseIdentity(), at: 1 });
+		await privateLease(leasePath);
+		const result = await host.inspectSettledWorker({ task, attempt, workerId: "o-other-agent" }, context());
+		assert.equal(result.outcome, "unknown");
+		script.done();
+	});
+});
+
 test("termination quarantines ambiguity, late holders, and survivors without signaling unrelated PIDs", async (t) => {
 	const fixture = await paths(t);
 	for (const [name, suffix, expectedKills] of [

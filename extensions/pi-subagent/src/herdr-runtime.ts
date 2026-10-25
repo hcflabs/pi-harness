@@ -50,7 +50,7 @@ import {
 import { runProcess as defaultRunProcess } from "./process.ts";
 import { EXECUTION_BUDGET_ENV, type EphemeralSubagentExecutionBudget } from "./ephemeral.ts";
 import { assertPrivateLease, PI_SUBAGENT_PROCESS_LEASE, scanProcessLease } from "./process-lease.ts";
-import { readPrivateSession, readSessionTurn, type SessionTurn } from "./session-turn.ts";
+import { readPrivateSession, readSessionTurn, type PromptMatch, type SessionTurn } from "./session-turn.ts";
 import { READABLE_BRANCH_PATTERN } from "./worktree.ts";
 
 const MIN_HERDR_VERSION = [0, 9, 3] as const;
@@ -783,6 +783,40 @@ export class HerdrHostRuntime implements HostRuntime {
 		}
 	}
 
+	/**
+	 * Proves that the exact owned worker is settled with a `stop` Final turn on its latest recorded prompt.
+	 * The method reads the lifecycle and the session one time. It sends no prompt and closes nothing.
+	 */
+	async inspectSettledWorker(
+		input: { task: TaskRequest; attempt: TaskAttempt; workerId: string },
+		context: OperationContext,
+	): Promise<{ outcome: "settled" } | { outcome: "active" | "unknown"; failure: string }> {
+		try {
+			const allocation = ownedIntent(input.attempt, "agent");
+			requireIntentIdentity(allocation, input.attempt);
+			assertAgentIntent(allocation, input.attempt);
+			if (input.workerId !== allocation.agentName) throw new Error("Settled worker inspection does not target the exact saved agent.");
+			this.assertLeasePath(allocation.leasePath, allocation.token);
+			await assertPrivateLease(allocation.leasePath, false);
+			// runWorker adds the prompt count after it records the prompt. So the latest prompt has the identity of the count.
+			const index = input.attempt.prompts.length;
+			if (!index) throw new Error("Settled worker inspection requires a recorded worker prompt.");
+			const lifecycle = await this.waitForAgentLifecycle(allocation, context, true);
+			if (!SETTLED_AGENT_STATES.has(lifecycle.status)) {
+				return { outcome: "active", failure: `The exact worker is not settled: ${lifecycle.status}.` };
+			}
+			const suffix = `\n\nTurn identity: ${input.attempt.correlationToken}:${index}`;
+			const turn = await this.workerSessionTurn(allocation, (text) => text.endsWith(suffix), context.signal);
+			if (turn.state === "succeeded") return { outcome: "settled" };
+			if (turn.state === "failed") return { outcome: "unknown", failure: `The latest worker prompt has no stop Final turn. ${turn.failure}` };
+			return { outcome: "active", failure: turn.state === "running"
+				? "The latest worker prompt has no Final turn yet."
+				: "The worker session has no entry for the latest worker prompt." };
+		} catch (error) {
+			return { outcome: "unknown", failure: safeText(error) };
+		}
+	}
+
 	private async proveAbsentAgentForCleanup(
 		allocation: AgentAllocationIntent,
 		attempt: TaskAttempt,
@@ -1350,7 +1384,7 @@ export class HerdrHostRuntime implements HostRuntime {
 		return `${leasePath}.session.jsonl`;
 	}
 
-	private async workerSessionTurn(allocation: AgentAllocationIntent, prompt: string, signal: AbortSignal): Promise<SessionTurn> {
+	private async workerSessionTurn(allocation: AgentAllocationIntent, prompt: PromptMatch, signal: AbortSignal): Promise<SessionTurn> {
 		const final = await readSessionTurn(this.workerSessionFile(allocation.leasePath, allocation.token), prompt, { signal });
 		// A symbolic link in the lease directories can redirect the session path, so evidence needs private directories.
 		if (final.state !== "absent") await this.assertPrivateLeaseDirectories(allocation.leasePath, false);
