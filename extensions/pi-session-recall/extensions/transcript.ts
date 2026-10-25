@@ -18,6 +18,12 @@ export const MAX_SESSION_FILE_BYTES = 32 * 1024 * 1024;
  *  Shared with hydration: callers pass their own byte ceiling (both use
  *  MAX_SESSION_FILE_BYTES in production). */
 export function readBoundedSnapshot(filePath: string, maxBytes: number): string {
+	return readBoundedSnapshotBytes(filePath, maxBytes).toString("utf-8");
+}
+
+/** Byte form of readBoundedSnapshot. The index engine uses the bytes to
+ *  verify an unchanged prefix before it parses only appended lines. */
+export function readBoundedSnapshotBytes(filePath: string, maxBytes: number): Buffer {
 	// O_NONBLOCK keeps a writerless FIFO (regular .jsonl swapped mid-walk) from
 	// blocking this open before fstat rejects it; O_NOFOLLOW (absent on Windows)
 	// rejects a symlink swapped in after the walk instead of following it.
@@ -38,7 +44,7 @@ export function readBoundedSnapshot(filePath: string, maxBytes: number): string 
 			if (n === 0) break; // truncated concurrently after fstat: index what was there
 			read += n;
 		}
-		return buf.toString("utf-8", 0, read);
+		return buf.subarray(0, read);
 	} finally {
 		fs.closeSync(fd);
 	}
@@ -83,8 +89,17 @@ export function* readTranscriptEntries(
 	filePath: string,
 	maxBytes: number = MAX_SESSION_FILE_BYTES,
 ): Generator<TranscriptEntry> {
-	const content = readBoundedSnapshot(filePath, maxBytes);
-	const seenIds = new Set<string>();
+	yield* parseTranscriptLines(readBoundedSnapshot(filePath, maxBytes));
+}
+
+/** Yield the JSONL entries of decoded snapshot text with the rules of
+ *  readTranscriptEntries. `seenIds` holds the ids that earlier lines reserved.
+ *  The parser adds each new valid id to it. Pass the set from an earlier
+ *  parse to continue that parse after a line boundary. */
+export function* parseTranscriptLines(
+	content: string,
+	seenIds: Set<string> = new Set<string>(),
+): Generator<TranscriptEntry> {
 	let start = 0;
 	while (start < content.length) {
 		const nl = content.indexOf("\n", start);

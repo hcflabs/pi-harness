@@ -60,7 +60,11 @@ Project directories use repeatable local Git config key `pi-add-dir.directory`, 
 
 Select persistent scopes explicitly: external directories can inject `AGENTS.md`, `CLAUDE.md`, and skills.
 
+Pi keeps the external context injection in memory. Pi reuses it when directory paths, labels, order, and context file metadata stay unchanged. Pi checks metadata before each agent start. Resource reload discards this cache.
+
 ## Limits and recovery
+
+Pi reads at most 64 KiB (65536 bytes) from each external context file. Files at or under this cap stay unchanged. For larger files, Pi excludes any incomplete UTF-8 character at the cap. Pi appends a truncation note that names the file and the cap. This limit applies to injected context and `add_directory` results. Reduce the file size to include all instructions.
 
 Search uses Node and supports basename and relative-path globs. It skips `.git`, `node_modules`, and symbolic links.
 

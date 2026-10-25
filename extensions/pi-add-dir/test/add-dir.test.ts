@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import fs from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 import { join } from "node:path";
@@ -284,9 +286,16 @@ test("requests a skill reload only when discovered skill paths change", async ()
 	}
 });
 
-test("injects external context through a stable named prompt section", async () => {
+test("injects cached external context through a stable named prompt section", async (t) => {
 	const external = await mkdtemp(join(tmpdir(), "pi-add-dir-"));
+	const originalRead = fs.readSync;
+	let reads = 0;
 	try {
+		t.mock.method(fs, "readSync", (...args: Parameters<typeof originalRead>) => {
+			reads += 1;
+			return originalRead(...args);
+		});
+		syncBuiltinESMExports();
 		await writeFile(join(external, "AGENTS.md"), "Follow external instructions.\n");
 		const branch = [{
 			type: "custom",
@@ -301,7 +310,21 @@ test("injects external context through a stable named prompt section", async () 
 		assert.equal(event.systemPrompt, "base");
 		assert.deepEqual(Object.keys(event.systemPromptOptions.sections), ["pi_add_dir"]);
 		assert.match(event.systemPromptOptions.sections.pi_add_dir!, /External Directories.*Follow external instructions/s);
+		const first = event.systemPromptOptions.sections.pi_add_dir;
+		const firstReads = reads;
+		assert.ok(firstReads > 0);
+		const second = { systemPromptOptions: { sections: {} as Record<string, string> } };
+		await handlers.get("before_agent_start")!(second, {} as ExtensionContext);
+		assert.equal(second.systemPromptOptions.sections.pi_add_dir, first);
+		assert.equal(reads, firstReads);
+
+		await writeFile(join(external, "AGENTS.md"), "Changed external instructions.\n");
+		await handlers.get("before_agent_start")!(second, {} as ExtensionContext);
+		assert.ok(reads > firstReads);
+		assert.match(second.systemPromptOptions.sections.pi_add_dir!, /Changed external instructions/);
 	} finally {
+		t.mock.restoreAll();
+		syncBuiltinESMExports();
 		await rm(external, { recursive: true, force: true });
 	}
 });

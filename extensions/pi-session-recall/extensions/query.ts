@@ -273,7 +273,7 @@ function spaceParensOutsideQuotes(q: string): string {
 	return out;
 }
 
-function buildBooleanLikeSql(rawQuery: string): LikeSql | null {
+function buildBooleanLikeSql(rawQuery: string): (LikeSql & { operands: string[] }) | null {
 	let query = rawQuery.trim();
 	if (!query) return null;
 	// Imbalance detection/recovery is quote-aware: parentheses inside quoted
@@ -296,9 +296,11 @@ function buildBooleanLikeSql(rawQuery: string): LikeSql | null {
 	const tokens: LikeToken[] = [...spaceParensOutsideQuotes(query).matchAll(TOKEN_RE)]
 		.map((m) => (m[1] !== undefined ? { phrase: unescapePhrase(m[1]) } : { word: m[2] ?? "" }))
 		.filter((t) => (t.phrase !== undefined ? t.phrase !== "" : t.word !== ""));
-	const fail = (): LikeSql | null => tokens.some((token) => token.word === "NEAR") ? { where: "0", params: [] } : null;
+	const fail = (): (LikeSql & { operands: string[] }) | null => tokens.some((token) => token.word === "NEAR") ? { where: "0", params: [], operands: [] } : null;
 	const sql: string[] = [];
 	const params: SQLInputValue[] = [];
+	// Plain operand terms in LIKE form. NEAR operands are not included.
+	const operands: string[] = [];
 	let expectingOperand = true;
 	depth = 0;
 
@@ -347,14 +349,41 @@ function buildBooleanLikeSql(rawQuery: string): LikeSql | null {
 		if (!expectingOperand) sql.push("AND");
 		sql.push(clause.clause);
 		params.push(...clause.params);
+		operands.push(normalizeLikeTerm(term, token.phrase !== undefined));
 		expectingOperand = false;
 	}
 
-	return expectingOperand || depth !== 0 ? fail() : { where: sql.join(" "), params };
+	return expectingOperand || depth !== 0 ? fail() : { where: sql.join(" "), params, operands };
 }
 
 interface LikeQueryPlan extends LikeSql {
 	terms: string[];
+	/** FTS5 MATCH expression whose rows include every row that `where`
+	 *  matches, or null. A caller can add it to `where` as a candidate filter. */
+	ftsPrefilter: string | null;
+}
+
+/** Build a candidate filter for a pure-AND LIKE plan. Each operand of such a
+ *  plan is required, so an AND of FTS5 phrases for some operands is a valid
+ *  filter when each phrase matches every row that its LIKE clause matches.
+ *  Trigram MATCH of a phrase is a substring test on FTS5-folded text. LIKE is
+ *  a substring test on foldCase text. The two folds agree for printable ASCII
+ *  operands with one exception:
+ *  - foldCase changes İ (U+0130) to "i" + U+0307, but FTS5 keeps İ.
+ *  That "i" can only be the last character of an ASCII match, so the filter
+ *  removes a final "i". KELVIN SIGN (U+212A) folds to "k" in both. Other
+ *  operands, and operands below 3 characters, stay out of the filter. */
+function likeFtsPrefilter(query: string, operands: string[]): string | null {
+	if (OPERATOR_RE.test(query)) return null;
+	const phrases: string[] = [];
+	for (const operand of operands) {
+		let folded = foldCase(operand);
+		if (!/^[\x20-\x7e]*$/.test(folded)) continue;
+		if (folded.endsWith("i")) folded = folded.slice(0, -1);
+		if (folded.length < 3) continue;
+		phrases.push(`"${folded.replace(/"/g, '""')}"`);
+	}
+	return phrases.length > 0 ? phrases.join(" ") : null;
 }
 
 export function buildLikeQueryPlan(rawQuery: string): LikeQueryPlan | null {
@@ -375,5 +404,6 @@ export function buildLikeQueryPlan(rawQuery: string): LikeQueryPlan | null {
 		terms,
 		where: bool?.where ?? clauses.map((clause) => clause.clause).join(" AND "),
 		params: bool?.params ?? clauses.flatMap((clause) => clause.params),
+		ftsPrefilter: likeFtsPrefilter(query, bool?.operands ?? terms),
 	};
 }

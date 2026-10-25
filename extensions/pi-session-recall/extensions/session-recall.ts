@@ -9,7 +9,7 @@ import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type, type TSchema } from "typebox";
 import { realpathSync } from "node:fs";
 import { join, sep } from "node:path";
-import { getPreparationRows, getSessionRows, searchIndex, syncSessions } from "./search-core.ts";
+import { closeIndexDatabases, getPreparationRows, getSessionRows, searchIndex, syncSessions } from "./search-core.ts";
 import { getWindow, readSession } from "./hydrate.ts";
 import { MAX_QUERY_CHARS } from "./query.ts";
 import { inventoryRepository, type RepositoryInventory } from "./repository-inventory.ts";
@@ -368,6 +368,11 @@ export default function (pi: ExtensionAPI): void {
 				// Index stays stale; next tool call retries.
 			}
 		}, 0);
+	});
+	// search-core keeps one index connection open across tool calls. Close it
+	// when the runtime stops. A later call opens a new connection.
+	pi.on("session_shutdown", () => {
+		closeIndexDatabases();
 	});
 
 	pi.registerTool({
