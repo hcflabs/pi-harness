@@ -8,7 +8,7 @@ Pi Notes keeps a small set of user reminders for each Git worktree. These remind
 A user-managed reminder attached to one Git worktree, shown above the editor in later sessions for that same worktree. A worktree has at most four notes.
 
 **Worktree identity**:
-The repository, checkout, and Git worktree instance to which notes belong. A new worktree at a reused path does not inherit the old instance's notes.
+The repository, checkout, and Git worktree instance to which notes belong. A new worktree at a reused path does not inherit the old instance's notes. Outside a Git repository, the identity is the real path of the working directory.
 
 **Stale notes**:
-Saved reminders for a repository or worktree that no longer exists, eligible for removal. A malformed notes file is not evidence that its notes are stale.
+Saved reminders for a repository, worktree, or directory that no longer exists, eligible for removal. A malformed notes file is not evidence that its notes are stale.

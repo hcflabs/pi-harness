@@ -173,6 +173,9 @@ importers:
       '@hcflabs/pi-config-store':
         specifier: ^4.0.0
         version: link:../../packages/pi-config-store
+      '@hcflabs/pi-repo':
+        specifier: ^0.1.0
+        version: link:../../packages/pi-repo
     devDependencies:
       '@earendil-works/pi-coding-agent':
         specifier: 1.3.0
