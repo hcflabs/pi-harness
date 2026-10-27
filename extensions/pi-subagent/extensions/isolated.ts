@@ -1019,23 +1019,61 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 			], "removal report lines omitted; reopen /subagent to inspect retained resources.") };
 		},
 		async prunePlan(cwd) {
-			const root = await lookupRoot(cwd);
+			let root: string;
+			try {
+				root = await lookupRoot(cwd);
+			} catch (error) {
+				// Outside a Git repository, review each Repository target below cwd. Any other failure stays a failure.
+				if (await gitTopLevel(cwd).then((top) => top !== undefined, () => true)) throw error;
+				const found = await discoverRepos(cwd);
+				const items: PruneItem[] = [];
+				const warnings = discoveryWarnings(found);
+				for (const { repo, root: child } of found.repos) {
+					try {
+						for (const item of await inspectPruneCandidates(child, child, pruneGuards(child))) items.push({ ...item, repo });
+					} catch (failure) {
+						warnings.push(`Prune review could not read repo ${repo}: ${boundedPublicText(failure instanceof Error ? failure.message : String(failure))}`);
+					}
+				}
+				return { root: found.base, items, warnings };
+			}
 			return { root, items: await inspectPruneCandidates(root, cwd, pruneGuards(root)) };
 		},
 		async prune(cwd, items, allowIgnored, force, current) {
 			requireCurrent(current);
-			const root = await lookupRoot(cwd);
-			const { removals, checkouts } = await removePruneCandidates(root, cwd, items, allowIgnored, force,
-				{ ...pruneGuards(root), current: () => current() && !sessionClosed });
-			const removed = removals.filter(({ outcome }) => outcome === "removed");
-			const reconciled = removed.length
-				? await getComponents().runner.reconcilePrunedAborts(checkouts, removed.map(({ item }) => basename(item.branch))) : [];
-			const count = (outcome: string) => removals.filter((item) => item.outcome === outcome).length;
-			return { failed: count("failed"), skipped: count("skipped"), text: boundedReport([
-				`Pi Subagent prune in ${root}: ${removed.length} removed, ${count("skipped")} skipped, ${count("failed")} failed.`,
-				...removals.map(({ outcome, item, reason }) => `${outcome}: ${item.path ?? "(no checkout)"} · ${item.branch} · ${reason}`),
-				...reconciled,
-			], "prune report lines omitted.") };
+			// Items reviewed in a parent directory carry their Repository target. Group them so each repository is checked again.
+			const groups = new Map<string | undefined, PruneItem[]>();
+			for (const item of items) groups.set(item.repo, [...groups.get(item.repo) ?? [], item]);
+			const lines: string[] = [];
+			let failed = 0;
+			let skipped = 0;
+			for (const [repo, group] of groups) {
+				requireCurrent(current);
+				let root: string;
+				try {
+					root = await lookupRoot(cwd, undefined, repo);
+				} catch (error) {
+					// One unreadable Repository target keeps its items and does not stop the other targets.
+					failed += group.length;
+					lines.push(`failed: repo ${repo}: ${group.length} item(s) kept: ${boundedPublicText(error instanceof Error ? error.message : String(error))}`);
+					continue;
+				}
+				const mainCwd = repo === undefined ? cwd : root;
+				const { removals, checkouts } = await removePruneCandidates(root, mainCwd, group, allowIgnored, force,
+					{ ...pruneGuards(root), current: () => current() && !sessionClosed });
+				const removed = removals.filter(({ outcome }) => outcome === "removed");
+				const reconciled = removed.length
+					? await getComponents().runner.reconcilePrunedAborts(checkouts, removed.map(({ item }) => basename(item.branch))) : [];
+				const count = (outcome: string) => removals.filter((item) => item.outcome === outcome).length;
+				failed += count("failed");
+				skipped += count("skipped");
+				lines.push(
+					`Pi Subagent prune in ${root}: ${removed.length} removed, ${count("skipped")} skipped, ${count("failed")} failed.`,
+					...removals.map(({ outcome, item, reason }) => `${outcome}: ${item.path ?? "(no checkout)"} · ${item.branch} · ${reason}`),
+					...reconciled,
+				);
+			}
+			return { failed, skipped, text: boundedReport(lines.length ? lines : ["Pi Subagent prune: nothing selected."], "prune report lines omitted.") };
 		},
 		async inspect(root, requestId) {
 			const response = await getComponents().runner.status(requestId, root);

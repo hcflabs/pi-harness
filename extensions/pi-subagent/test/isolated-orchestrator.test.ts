@@ -1716,6 +1716,32 @@ test("inventory outside a Git repository lists the requests of each Repository t
 	await assert.rejects(failing.surface.inventory(child), /git timed out/);
 });
 
+test("prune outside a Git repository reviews and removes the items of each Repository target", async (t) => {
+	const parent = await realpath(await mkdtemp(join(tmpdir(), "pi-subagent-prune-parent-")));
+	t.after(() => rm(parent, { recursive: true, force: true }));
+	const child = join(parent, "team", "service");
+	await mkdir(child, { recursive: true });
+	const git = (...args: string[]) => execFileSync("git", ["-C", child, ...args], { stdio: "pipe" });
+	git("init", "-q");
+	git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base");
+	const branch = `pi-subagent/subagent-${"a".repeat(24)}`;
+	git("branch", branch);
+	const harness = createHarness({
+		resolveRoot: async (cwd) => { if (cwd === parent) throw new Error("git rev-parse --show-toplevel failed with exit 128: fatal: not a git repository"); return cwd; },
+		patchRunner: { async pruneOwnership() { return { owners: () => [] }; }, async reconcilePrunedAborts() { return []; } },
+	});
+	const plan = await harness.surface.prunePlan(parent);
+	assert.equal(plan.root, parent);
+	assert.deepEqual(plan.items.map(({ branch: name, prunable, repo }) => [name, prunable, repo]), [[branch, true, "team/service"]]);
+	const report = await harness.surface.prune(parent, plan.items, false, false, () => true);
+	assert.equal(report.failed, 0, report.text);
+	assert.equal(report.skipped, 0, report.text);
+	assert.equal(git("branch", "--list", branch).toString().trim(), "");
+	// A Git failure inside a repository is not a parent directory.
+	const failing = createHarness({ resolveRoot: async () => { throw new Error("git timed out"); } });
+	await assert.rejects(failing.surface.prunePlan(child), /git timed out/);
+});
+
 test("inventory skips a repository that was removed after discovery and reports other read failures", async (t) => {
 	const parent = await realpath(await mkdtemp(join(tmpdir(), "pi-subagent-inventory-race-")));
 	t.after(() => rm(parent, { recursive: true, force: true }));

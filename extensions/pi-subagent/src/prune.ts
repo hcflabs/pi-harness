@@ -19,6 +19,8 @@ export interface PruneRequest { id: string; name: string; status: string; direct
 
 /** One reviewed pi-subagent branch, with its registered checkout when one exists. */
 export interface PruneItem {
+	/** The Repository target selector, when /subagent prune runs in a parent directory of repositories. */
+	repo?: string;
 	branch: string;
 	tip: string;
 	path?: string;
