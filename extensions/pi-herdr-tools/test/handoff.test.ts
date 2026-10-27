@@ -201,12 +201,176 @@ test("herdr_handoff rejects an invalid repo before it creates anything", async (
 	});
 });
 
-test("herdr_handoff without repo asks for one when the workspace has no Git checkout", async () => {
-	await withPane("pane-parent", async () => {
-		const app = harness((command, args) => args[0] === "workspace" && args[1] === "get"
-			? success({ result: { workspace: { workspace_id: args[2], worktree: null } } })
-			: linkedWorktree(command, args), "/code/group");
-		await assert.rejects(app.run(), /has no Git checkout\. Set repo/);
-		assert.equal(app.created(), false);
+const plainWorkspace = (command: string, args: string[]) => args[0] === "workspace" && args[1] === "get"
+	? success({ result: { workspace: { workspace_id: args[2], worktree: null } } })
+	: linkedWorktree(command, args);
+
+/** Git answers for a parent directory of repositories: only a directory below `parent` is a top level. */
+function parentGit(parent: string, override?: (args: string[], cwd?: string) => ExecResult | undefined) {
+	return (command: string, args: string[], cwd?: string): ExecResult | undefined => {
+		if (command === "git") {
+			const custom = override?.(args, cwd);
+			if (custom) return custom;
+			if (args.includes("--show-toplevel")) return cwd !== undefined && cwd !== parent ? success(`${cwd}\n`) : failure;
+			if (args.includes("--git-dir") || args.includes("--git-common-dir")) return { ...failure, code: 128, stderr: "fatal: not a git repository" };
+		}
+		return linkedWorktree(command, args);
+	};
+}
+
+async function withRepos(names: string[], run: (parent: string) => Promise<void>): Promise<void> {
+	const parent = await realpath(await mkdtemp(join(tmpdir(), "pi-herdr-handoff-repos-")));
+	try {
+		for (const name of names) await mkdir(join(parent, name, ".git"), { recursive: true });
+		await run(parent);
+	} finally {
+		await rm(parent, { recursive: true, force: true });
+	}
+}
+
+test("herdr_handoff without repo outside a Git repository names repo and lists the child repositories", async () => {
+	await withRepos(["team/service", "tools"], async (parent) => {
+		await withPane("pane-linked", async () => {
+			const app = harness(parentGit(parent), parent);
+			await assert.rejects(app.run(), (error: Error) => {
+				assert.match(error.message, /not in a Git repository/);
+				assert.match(error.message, /Set the repo parameter/);
+				assert.match(error.message, /team\/service, tools/);
+				assert.match(error.message, /nothing was created/i);
+				return true;
+			});
+			assert.equal(app.created(), false);
+		});
+	});
+});
+
+test("herdr_handoff without repo lists a bounded set of child repositories", async () => {
+	const names = Array.from({ length: 30 }, (_, index) => `r${String(index).padStart(2, "0")}`);
+	await withRepos(names, async (parent) => {
+		await withPane("pane-linked", async () => {
+			const app = harness(parentGit(parent), parent);
+			await assert.rejects(app.run(), (error: Error) => {
+				assert.match(error.message, /r00, r01/);
+				assert.match(error.message, /r19\b/);
+				assert.doesNotMatch(error.message, /r20/);
+				assert.match(error.message, /may be incomplete/);
+				return true;
+			});
+		});
+	});
+});
+
+test("herdr_handoff without repo reports the exit code and bounded stderr of another Git failure", async () => {
+	await withRepos(["service"], async (parent) => {
+		const root = join(parent, "service");
+		const cases: Array<[string, ExecResult, RegExp]> = [
+			["old Git", { stdout: "", stderr: `error: unknown option \`path-format=absolute'${"x".repeat(5000)}`, code: 129, killed: false }, /exit 129: error: unknown option/],
+			["timeout", { stdout: "", stderr: "", code: 0, killed: true }, /did not finish/],
+		];
+		for (const [name, result, pattern] of cases) {
+			await withPane("pane-linked", async () => {
+				const app = harness(parentGit(root, (args) => args.includes("--git-common-dir") ? result : undefined), root);
+				await assert.rejects(app.run(), (error: Error) => {
+					assert.match(error.message, pattern, name);
+					assert.doesNotMatch(error.message, /not in a Git repository/, name);
+					assert.ok(error.message.length < 1_500, name);
+					return true;
+				});
+				assert.equal(app.created(), false, name);
+			});
+		}
+	});
+});
+
+test("herdr_handoff without repo uses the Pi working directory when the workspace has no Git checkout", async () => {
+	await withRepos(["service"], async (parent) => {
+		const root = join(parent, "service");
+		await withPane("pane-plain", async () => {
+			const app = harness((command, args, cwd) => command === "git" && args.includes("--show-toplevel") ? success(`${root}\n`)
+				: command === "git" ? linkedWorktree(command, args)
+				: plainWorkspace(command, args), root);
+			const result = await app.run();
+
+			const herdrArgs = app.calls.filter((call) => call.command === "herdr").map((call) => call.args);
+			assert.deepEqual(herdrArgs.find((args) => args[0] === "worktree"), [
+				"worktree", "create", "--cwd", root,
+				"--branch", "fix/login", "--base", "main", "--label", "Fix login", "--no-focus",
+			]);
+			assert.equal(herdrArgs.some((args) => args[0] === "workspace" && args[1] === "list"), false);
+			for (const check of ["rev-parse", "show-ref"]) {
+				const call = app.calls.find((entry) => entry.command === "git" && entry.args[0] === check && !entry.args.includes("--show-toplevel"));
+				assert.equal(call?.cwd, root, check);
+			}
+			assert.equal(result.details.branch, "fix/login");
+		});
+	});
+});
+
+test("herdr_handoff without repo keeps the local main requirement when the Pi working directory is the repository", async () => {
+	await withRepos(["service"], async (parent) => {
+		const root = join(parent, "service");
+		await withPane("pane-plain", async () => {
+			const app = harness((command, args) => command === "git" && args.includes("--show-toplevel") ? success(`${root}\n`)
+				: command === "git" && args.includes("refs/heads/main") ? failure
+				: plainWorkspace(command, args), root);
+			await assert.rejects(app.run(), /local main branch/);
+			assert.equal(app.created(), false);
+		});
+	});
+});
+
+test("herdr_handoff accepts repo . for a Pi working directory that is a Git top-level directory", async () => {
+	await withRepos(["service"], async (parent) => {
+		const root = join(parent, "service");
+		await withPane("pane-plain", async () => {
+			const app = harness((command, args) => command === "git" && args.includes("--show-toplevel") ? success(`${root}\n`)
+				: plainWorkspace(command, args), root);
+			const result = await app.run(undefined, { repo: "." });
+			const create = app.calls.find((call) => call.args[0] === "worktree");
+			assert.deepEqual(create?.args.slice(0, 4), ["worktree", "create", "--cwd", root]);
+			assert.equal(result.details.repo, ".");
+		});
+	});
+});
+
+test("herdr_handoff without repo asks for one when the workspace has no Git checkout and the directory is not a Git top level", async () => {
+	await withRepos(["team/service", "tools"], async (parent) => {
+		const inside = join(parent, "tools", "src");
+		await mkdir(inside, { recursive: true });
+		const cases: Array<[string, string, (command: string, args: string[], cwd?: string) => ExecResult | undefined]> = [
+			["parent directory", parent, (command, args, cwd) => command === "git" ? parentGit(parent)(command, args, cwd) : plainWorkspace(command, args)],
+			["subdirectory", inside, (command, args) => command === "git" && args.includes("--show-toplevel") ? success(`${join(parent, "tools")}\n`) : plainWorkspace(command, args)],
+		];
+		for (const [name, cwd, respond] of cases) {
+			await withPane("pane-plain", async () => {
+				const app = harness((command, args, where) => respond(command, args, where), cwd);
+				await assert.rejects(app.run(), (error: Error) => {
+					assert.match(error.message, /has no Git checkout/, name);
+					assert.match(error.message, /Set the repo parameter/, name);
+					assert.match(error.message, /nothing was created/i, name);
+					if (name === "parent directory") assert.match(error.message, /team\/service, tools/, name);
+					return true;
+				});
+				assert.equal(app.created(), false, name);
+			});
+		}
+	});
+});
+
+test("herdr_handoff without repo reports a Git failure while it checks the Pi working directory", async () => {
+	await withRepos(["service"], async (parent) => {
+		const root = join(parent, "service");
+		await withPane("pane-plain", async () => {
+			const app = harness((command, args) => command === "git" && args.includes("--show-toplevel")
+				? { stdout: "", stderr: "fatal: detected dubious ownership", code: 128, killed: false }
+				: plainWorkspace(command, args), root);
+			await assert.rejects(app.run(), (error: Error) => {
+				assert.match(error.message, /exit 128: fatal: detected dubious ownership/);
+				assert.doesNotMatch(error.message, /not in a Git repository/);
+				assert.match(error.message, /nothing was created/i);
+				return true;
+			});
+			assert.equal(app.created(), false);
+		});
 	});
 });
