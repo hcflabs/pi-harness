@@ -32,6 +32,8 @@ Pi adds root `AGENTS.md`, `CLAUDE.md`, `.pi/AGENTS.md`, and `.pi/CLAUDE.md` to l
 
 External instructions and skills enter through a model-visible tool call or user command.
 
+Pi loads `AGENTS.md` and `CLAUDE.md` from the working directory and its ancestors only. Pi does not load them from child directories. To use a child repository in a parent directory that is not a Git repository, run `/dir-add <child>`.
+
 ### Search results
 
 `search_external_files` declares an output schema. Scripts receive `{ pattern, maxResults, searchedDirectories, totalFound, truncated, directories }`.
@@ -54,9 +56,16 @@ Global additions and removals fail until you fix reported config problems. Reloa
 
 ## State and storage
 
-Session directories belong to the current session branch. New additions reject directories inside or containing Pi's working directory, or overlapping active external directories. Restored session entries do not repeat overlap checks when the working directory changes.
+Session directories belong to the current session branch. New additions reject Pi's working directory and its ancestors, because Pi already loads their context. New additions also reject a directory that overlaps an active external directory. Restored session entries do not repeat overlap checks when the working directory changes.
 
-Project directories use repeatable local Git config key `pi-add-dir.directory`, shared by linked worktrees. This machine-local config cannot come from a clone. `/dir-add --project` requires a Git repository.
+New additions accept a child of the working directory in these cases:
+
+- The working directory is not in a Git repository.
+- The child is in a different Git repository than the working directory.
+
+New additions reject a plain subdirectory of the working directory's own Git repository.
+
+Project directories use repeatable local Git config key `pi-add-dir.directory`, shared by linked worktrees. This machine-local config cannot come from a clone. `/dir-add --project` requires a Git repository. In a directory that is not a Git repository, the command fails and names `--global` as the alternative.
 
 Select persistent scopes explicitly: external directories can inject `AGENTS.md`, `CLAUDE.md`, and skills.
 

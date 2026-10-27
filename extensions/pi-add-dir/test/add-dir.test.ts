@@ -478,6 +478,85 @@ test("rejects an ancestor of the current working directory", async () => {
 	}
 });
 
+test("rejects the current working directory itself", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-add-dir-"));
+	try {
+		const { tools } = loadExtension();
+		await assert.rejects(
+			tools.get("add_directory")!.execute("call", { path: cwd }, undefined, undefined, extensionContext(cwd, () => [])),
+			/overlaps current working directory scope/,
+		);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("adds child directories when the current working directory is not in a Git repository", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-add-dir-parent-"));
+	try {
+		const child = join(cwd, "child");
+		await mkdir(child);
+		await writeFile(join(child, "AGENTS.md"), "Child instructions.\n");
+		const { handlers, tools } = loadExtension();
+		const ctx = extensionContext(cwd, () => []);
+		await handlers.get("session_start")!({}, ctx);
+
+		const result = await tools.get("add_directory")!.execute("call", { path: child }, undefined, undefined, ctx);
+		assert.match(result.content[0].text, /Child instructions/);
+		const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
+		await handlers.get("before_agent_start")!(event, {} as ExtensionContext);
+		assert.match(event.systemPromptOptions.sections.pi_add_dir!, /Child instructions/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("keeps a stored child directory active at session start when the current working directory is not in a Git repository", async () => {
+	const agentDir = await mkdtemp(join(tmpdir(), "pi-add-dir-agent-"));
+	const cwd = await mkdtemp(join(tmpdir(), "pi-add-dir-parent-"));
+	try {
+		const child = join(cwd, "child");
+		await mkdir(child);
+		await writeFile(join(child, "AGENTS.md"), "Stored child instructions.\n");
+		await createAddDirConfigStore(agentDir).save({ directories: [resolveDir(child, cwd)] });
+		const notifications: Array<{ message: string; level: string }> = [];
+		const { handlers } = loadExtension({ agentDir });
+		await handlers.get("session_start")!({}, interactiveContext(cwd, () => [], { notifications }));
+		assert.deepEqual(notifications, []);
+		const event = { systemPromptOptions: { sections: {} as Record<string, string> } };
+		await handlers.get("before_agent_start")!(event, {} as ExtensionContext);
+		assert.match(event.systemPromptOptions.sections.pi_add_dir!, /Stored child instructions/);
+	} finally {
+		await rm(agentDir, { recursive: true, force: true });
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("adds a separate Git repository below the current working directory but not a plain subdirectory of the same repository", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "pi-add-dir-repo-"));
+	try {
+		await git(cwd, ["init", "-q"]);
+		const plain = join(cwd, "plain");
+		const nested = join(cwd, "vendor", "nested");
+		await mkdir(plain);
+		await mkdir(nested, { recursive: true });
+		await git(nested, ["init", "-q"]);
+		const { handlers, tools } = loadExtension({ exec: realExec });
+		const ctx = extensionContext(cwd, () => []);
+		await handlers.get("session_start")!({}, ctx);
+		const addDirectory = tools.get("add_directory")!;
+
+		await assert.rejects(
+			addDirectory.execute("plain", { path: plain }, undefined, undefined, ctx),
+			/overlaps current working directory scope/,
+		);
+		const result = await addDirectory.execute("nested", { path: nested }, undefined, undefined, ctx);
+		assert.equal(result.details.directory, resolveDir(nested, cwd));
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 test("renders a failed add_directory result from its content text", () => {
 	const { tools } = loadExtension();
 	const theme = { fg: (_color: string, text: string) => text };
@@ -822,7 +901,7 @@ test("rejects project persistence outside a Git repository", async () => {
 		await handlers.get("session_start")!({}, ctx);
 		await commands.get("dir-add")!.handler(`--project ${external}`, ctx as ExtensionCommandContext);
 		assert.deepEqual(notifications.at(-1), {
-			message: "Project-persistent directories require a Git repository.",
+			message: "Project-persistent directories require a Git repository. Use --global to save the directory for every workspace.",
 			level: "error",
 		});
 	} finally {
