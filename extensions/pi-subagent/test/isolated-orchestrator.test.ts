@@ -1742,6 +1742,93 @@ test("prune outside a Git repository reviews and removes the items of each Repos
 	await assert.rejects(failing.surface.prunePlan(child), /git timed out/);
 });
 
+/** An outer repository with a plain directory `group` and a child repository `group/svc`. */
+async function outerLayout(t: { after(fn: () => Promise<void>): void }, prefix: string) {
+	const outer = await realpath(await mkdtemp(join(tmpdir(), `${prefix}-`)));
+	t.after(() => rm(outer, { recursive: true, force: true }));
+	const group = join(outer, "group");
+	const child = join(group, "svc");
+	await mkdir(child, { recursive: true });
+	for (const path of [outer, child]) {
+		execFileSync("git", ["-C", path, "init", "-q"], { stdio: "pipe" });
+		execFileSync("git", ["-C", path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "base"], { stdio: "pipe" });
+	}
+	// A Git repository root resolves to itself. Any other directory resolves to the outer repository.
+	const resolveRoot = async (cwd: string) => cwd === child ? child : outer;
+	return { outer, group, child, resolveRoot };
+}
+
+test("inventory in a plain directory of an outer repository also lists the Repository targets below it", async (t) => {
+	const { outer, group, child, resolveRoot } = await outerLayout(t, "pi-subagent-inventory-outer");
+	const harness = createHarness({ resolveRoot });
+	const inventory = await harness.surface.inventory(group);
+	assert.equal(inventory.root, outer);
+	assert.deepEqual(harness.runnerCalls.filter(({ method }) => method === "listRequests").map(({ args }) => args[0]), [outer, child]);
+	assert.deepEqual(inventory.requests.map(({ id, repo, leaseLive, checkout }) => [id, repo, leaseLive, checkout]), [
+		["request-one", undefined, false, undefined],
+		["request-one", "svc", false, child],
+	]);
+	assert.deepEqual(inventory.invalidIds, ["damaged", "svc/damaged"]);
+	assert.deepEqual(inventory.warnings, []);
+});
+
+test("inventory at the top level of a repository does not search for child repositories", async (t) => {
+	const { outer, resolveRoot } = await outerLayout(t, "pi-subagent-inventory-top");
+	const harness = createHarness({ resolveRoot });
+	const inventory = await harness.surface.inventory(outer);
+	assert.deepEqual(harness.runnerCalls.filter(({ method }) => method === "listRequests").map(({ args }) => args[0]), [outer]);
+	assert.deepEqual(inventory.requests.map(({ repo }) => repo), [undefined]);
+	assert.equal(inventory.warnings, undefined);
+});
+
+test("inventory in a plain directory of an outer repository reports a discovery that stopped at a limit", async (t) => {
+	const { group, resolveRoot } = await outerLayout(t, "pi-subagent-inventory-deep");
+	await mkdir(join(group, "a", "b", "c", "d"), { recursive: true });
+	const inventory = await createHarness({ resolveRoot }).surface.inventory(group);
+	assert.equal(inventory.warnings?.length, 1);
+	assert.match(inventory.warnings![0]!, /stopped at a limit.*not examined/);
+});
+
+test("recovery in a plain directory of an outer repository also recovers the Repository targets below it", async (t) => {
+	const { outer, group, child, resolveRoot } = await outerLayout(t, "pi-subagent-recover-outer");
+	const roots: string[] = [];
+	const patchRunner = {
+		async listRequests() { return { requests: [{ id: "request-one", name: "Goal", status: "working", tasks: [] }], invalidIds: [], states: [] }; },
+		async recoverRepository(root: string) { roots.push(root); return { requests: [], invalidIds: [], leaseBusy: false }; },
+	};
+	const harness = createHarness({ resolveRoot, patchRunner });
+	const report = await harness.surface.recover(group);
+	assert.deepEqual(roots, [outer, child]);
+	const [outerAt, repoAt, childAt] = [`recovery in ${outer}:`, "repo svc:", `recovery in ${child}:`].map((text) => report.indexOf(text));
+	assert.ok(outerAt >= 0 && outerAt < repoAt! && repoAt! < childAt!, report);
+	// At the top level of a repository, recovery reads only that repository.
+	roots.length = 0;
+	await createHarness({ resolveRoot, patchRunner }).surface.recover(outer);
+	assert.deepEqual(roots, [outer]);
+});
+
+test("prune in a plain directory of an outer repository reviews and removes the items of the outer repository and each Repository target", async (t) => {
+	const { outer, group, child, resolveRoot } = await outerLayout(t, "pi-subagent-prune-outer");
+	const branch = `pi-subagent/subagent-${"b".repeat(24)}`;
+	for (const path of [outer, child]) execFileSync("git", ["-C", path, "branch", branch], { stdio: "pipe" });
+	const harness = createHarness({
+		resolveRoot,
+		patchRunner: { async pruneOwnership() { return { owners: () => [] }; }, async reconcilePrunedAborts() { return []; } },
+	});
+	const plan = await harness.surface.prunePlan(group);
+	assert.equal(plan.root, outer);
+	assert.deepEqual(plan.items.map(({ branch: name, prunable, repo }) => [name, prunable, repo]), [[branch, true, undefined], [branch, true, "svc"]]);
+	assert.deepEqual(plan.warnings ?? [], []);
+	// At the top level of a repository, prune reviews only that repository.
+	const top = await harness.surface.prunePlan(outer);
+	assert.deepEqual(top.items.map(({ repo }) => repo), [undefined]);
+	assert.equal(top.warnings, undefined);
+	const report = await harness.surface.prune(group, plan.items, false, false, () => true);
+	assert.equal(report.failed, 0, report.text);
+	assert.equal(report.skipped, 0, report.text);
+	for (const path of [outer, child]) assert.equal(execFileSync("git", ["-C", path, "branch", "--list", branch]).toString().trim(), "");
+});
+
 test("inventory skips a repository that was removed after discovery and reports other read failures", async (t) => {
 	const parent = await realpath(await mkdtemp(join(tmpdir(), "pi-subagent-inventory-race-")));
 	t.after(() => rm(parent, { recursive: true, force: true }));

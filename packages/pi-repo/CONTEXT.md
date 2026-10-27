@@ -21,5 +21,5 @@ The real path of a Git top-level directory after symlink resolution.
 _Avoid_: repository key
 
 **Discovery**:
-A bounded, read-only search for Repository targets below a directory. It does not search inside a repository that it found.
+A bounded, read-only search for Repository targets below a directory. It also searches inside a repository that it found, for example for submodules.
 _Avoid_: scan, crawl

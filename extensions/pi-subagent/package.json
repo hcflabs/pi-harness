@@ -73,7 +73,7 @@
     "@hcflabs/pi-config-store": "^4.0.0",
     "@hcflabs/pi-herdr": "^0.7.0",
     "@hcflabs/pi-process": "^0.3.0",
-    "@hcflabs/pi-repo": "^0.1.0",
+    "@hcflabs/pi-repo": "^0.1.4",
     "@hcflabs/pi-task-models": "^9.3.0",
     "proper-lockfile": "^4.1.2"
   },
