@@ -76,6 +76,7 @@ export interface RepoDiscovery {
 	 * True when a limit stopped the search before it examined all directories.
 	 * The limits are `maxDepth`, `maxDirectories`, `limit`, and `budgetMs`.
 	 * A directory at `maxDepth` that has child directories sets it, because discovery does not open those children.
+	 * A directory at `maxDepth` inside a found repository does not set it.
 	 */
 	truncated: boolean;
 }
@@ -292,7 +293,8 @@ export async function discoverRepos(base: string, options: DiscoveryOptions = {}
 
 	const repos: DiscoveredRepo[] = [];
 	const issues: DiscoveryIssue[] = [];
-	const queue: Array<{ path: string; depth: number }> = [{ path: start, depth: 0 }];
+	// `inRepo` is true below a found repository. Its deep directories are normal repository content.
+	const queue: Array<{ path: string; depth: number; inRepo: boolean }> = [{ path: start, depth: 0, inRepo: false }];
 	let examined = 0;
 	let truncated = false;
 	// A directory at `maxDepth` that has child directories. Discovery does not open those children.
@@ -304,7 +306,7 @@ export async function discoverRepos(base: string, options: DiscoveryOptions = {}
 			truncated = true;
 			break;
 		}
-		const { path, depth } = queue.shift()!;
+		const { path, depth, inRepo } = queue.shift()!;
 		examined += 1;
 		const name = selector(canonicalBase, path);
 
@@ -343,7 +345,9 @@ export async function discoverRepos(base: string, options: DiscoveryOptions = {}
 		}
 		// A repository can hold more repositories. Read its directories like those of any other directory.
 		const atLimit = depth >= maxDepth;
-		if (atLimit && depthLimited) continue;
+		// Inside a repository, a directory at the limit does not set `truncated`, so it is not read.
+		const below = inRepo || marker !== undefined;
+		if (atLimit && (depthLimited || below)) continue;
 
 		let entries;
 		try {
@@ -360,7 +364,7 @@ export async function discoverRepos(base: string, options: DiscoveryOptions = {}
 			if (children.length > 0) depthLimited = true;
 			continue;
 		}
-		children.forEach((child) => queue.push({ path: join(path, child), depth: depth + 1 }));
+		children.forEach((child) => queue.push({ path: join(path, child), depth: depth + 1, inRepo: below }));
 	}
 
 	repos.sort((left, right) => compare(left.repo, right.repo));

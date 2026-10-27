@@ -42,6 +42,7 @@ A bad selector throws `RepoTargetError`. A Git failure throws a plain `Error`, f
 - It checks each `.git` entry with Git. It reports a bad entry in `issues`, and it still searches inside that directory.
 - It sets `truncated` when a limit stops the search. The time limit also caps each Git call.
 - It sets `truncated` when a directory at `maxDepth` has child directories, because it does not open those children. Raise `maxDepth` to search them.
+- Inside a found repository, a directory at `maxDepth` does not set `truncated`. Discovery does not find a repository below `maxDepth` inside another repository.
 - It sets `linkedWorktree` when the `.git` file names a `worktrees/` Git directory. It sets `submodule` when the file names a `modules/` Git directory. A repository with a `.git` directory, or with a separate Git directory, has neither flag.
 
 Discovery changes no files and no Git state. It runs one Git process for each `.git` entry that it finds.

@@ -196,14 +196,17 @@ test("discoverRepos reports truncation when a directory at the depth limit has c
 	assert.equal((await discoverRepos(flat, { exclude: ["child"] })).truncated, false);
 });
 
-test("discoverRepos reports a repository at the depth limit that has child directories", async (t) => {
+test("discoverRepos does not report truncation for directories inside a repository at the depth limit", async (t) => {
 	const base = await scratch(t);
 	const repo = await repository(join(base, "a", "b", "c"));
-	assert.equal((await discoverRepos(base)).truncated, false);
-	await mkdir(join(repo, "src"));
+	await mkdir(join(repo, "src", "lib"), { recursive: true });
 	const result = await discoverRepos(base);
 	assert.deepEqual(result.repos.map((item) => item.repo), ["a/b/c"]);
-	assert.equal(result.truncated, true);
+	// Ordinary repository content below the limit is not a missed repository.
+	assert.equal(result.truncated, false);
+	// A plain directory outside every repository still reports the limit.
+	await mkdir(join(base, "a", "b", "plain", "child"), { recursive: true });
+	assert.equal((await discoverRepos(base)).truncated, true);
 });
 
 test("discoverRepos lists repositories inside repositories and respects the depth and exclude rules there", async (t) => {
@@ -216,7 +219,8 @@ test("discoverRepos lists repositories inside repositories and respects the dept
 	await repository(join(outer, "a", "b", "c", "far"));
 	const result = await discoverRepos(base, { exclude: ["vendor"] });
 	assert.deepEqual(result.repos.map((repo) => repo.repo), ["outer", "outer/packages/inner"]);
-	assert.equal(result.truncated, true);
+	// `outer/a/b/c/far` is below the depth limit inside a repository. That is a documented limit, not truncation.
+	assert.equal(result.truncated, false);
 	assert.deepEqual((await discoverRepos(base, { exclude: ["vendor"], maxDepth: 5 })).repos.map((repo) => repo.repo), [
 		"outer", "outer/a/b/c/far", "outer/packages/inner",
 	]);
