@@ -78,6 +78,10 @@ importers:
         version: 1.3.0
 
   extensions/pi-deps:
+    dependencies:
+      '@hcflabs/pi-repo':
+        specifier: ^0.1.0
+        version: link:../../packages/pi-repo
     devDependencies:
       '@earendil-works/pi-coding-agent':
         specifier: 1.3.0
