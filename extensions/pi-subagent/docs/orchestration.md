@@ -537,7 +537,9 @@ Isolated Herdr Role launches receive the same turn, token, and child-runtime bud
 | `blame` | Required `path`, optional `revision` and paired `startLine`/`endLine` |
 | `rev-parse` | Optional `revision`; resolves one commit ID |
 
-Revisions accept commit IDs or named refs with optional `~N`/`^N` ancestry, not ranges or reflog expressions. Paths are literal and relative to the assigned cwd. The tool rejects absolute paths, traversal, `.git` components, and paths that look like options.
+Every operation accepts the optional `repo` parameter. Use it when the assigned cwd is a parent directory that is not a Git repository. `repo` is a child Git repository as a path relative to the assigned cwd, such as `team/service`. It follows the same rules as the `delegate_task` `repo` parameter: the path must stay inside cwd after symlink resolution and must be a Git top-level directory. If `repo` is omitted and cwd is not a Git repository, the call fails with a message that names `repo`. Main lists the targets with `subagent_repos`.
+
+Revisions accept commit IDs or named refs with optional `~N`/`^N` ancestry, not ranges or reflog expressions. Paths are literal. They are relative to the selected `repo`, or to the assigned cwd if `repo` is omitted. The tool rejects absolute paths, traversal, `.git` components, and paths that look like options.
 
 Use named candidate refs. Do not assume that Main's checkout contains an isolated candidate. In isolated judgment, the supplied exact patch stays authoritative. Git inspection supplies only referenced context, not a replacement diff. Reviewers still cannot run tests, write, commit, or push. They approve only with exact `PASS`.
 

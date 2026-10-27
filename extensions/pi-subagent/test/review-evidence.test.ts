@@ -134,7 +134,7 @@ test("git_read reports Git failures and truncation and honors cancellation", asy
 	await assert.rejects(inspectGit(repo, { operation: "show", path: "missing.txt" }), /git_read show.*exited 128.*does not exist/);
 	const outside = await mkdtemp(join(tmpdir(), "pi-subagent-no-git-"));
 	t.after(() => rm(outside, { recursive: true, force: true }));
-	await assert.rejects(inspectGit(outside, { operation: "status" }), /not a git repository/);
+	await assert.rejects(inspectGit(outside, { operation: "status" }), /not a Git repository.*repo parameter/);
 	await writeFile(join(repo, "large.txt"), `${"large line\n".repeat(10_000)}end\n`);
 	git(repo, "add", ".");
 	git(repo, "commit", "-qm", "large");
@@ -147,6 +147,61 @@ test("git_read reports Git failures and truncation and honors cancellation", asy
 	const pending = inspectGit(repo, { operation: "status" }, controller.signal);
 	controller.abort(new Error("review cancelled"));
 	await assert.rejects(pending, /review cancelled/);
+});
+
+test("git_read selects a child repository with repo when cwd is not a Git repository", async (t) => {
+	const parent = await mkdtemp(join(tmpdir(), "pi-subagent-git-read-parent-"));
+	t.after(() => rm(parent, { recursive: true, force: true }));
+	const child = join(parent, "team", "service");
+	await mkdir(join(child, "src"), { recursive: true });
+	git(child, "init", "-q");
+	git(child, "config", "user.name", "Test");
+	git(child, "config", "user.email", "test@example.com");
+	await writeFile(join(child, "src", "a.txt"), "child file\n");
+	git(child, "add", ".");
+	git(child, "commit", "-qm", "child commit");
+	await writeFile(join(child, "untracked.txt"), "new\n");
+	await mkdir(join(parent, "plain", "inner"), { recursive: true });
+	await symlink(child, join(parent, "alias"));
+	const output = async (params: unknown, cwd = parent) => (await inspectGit(cwd, params)).structuredContent.output;
+
+	for (const params of [{ operation: "status" }, { operation: "log" }, { operation: "rev-parse" }]) {
+		await assert.rejects(inspectGit(parent, params), (error: Error) => /not a Git repository/.test(error.message) && /repo parameter/.test(error.message), JSON.stringify(params));
+	}
+	assert.match(await output({ operation: "status", repo: "team/service" }), /\?\? untracked.txt/);
+	assert.match(await output({ operation: "log", repo: "team/service/", maxCount: 1 }), /child commit/);
+	assert.equal(await output({ operation: "show", repo: "team/service", path: "src/a.txt" }), "child file\n");
+	assert.equal(await output({ operation: "rev-parse", repo: "team/service" }), `${git(child, "rev-parse", "HEAD")}\n`);
+	assert.equal(await output({ operation: "show", repo: "alias", path: "src/a.txt" }), "child file\n");
+	// repo is relative to cwd, and path is relative to the selected repository.
+	assert.equal(await output({ operation: "show", repo: "service", path: "src/a.txt" }, join(parent, "team")), "child file\n");
+
+	for (const [repo, message] of [
+		["plain", /not in a Git repository/], ["plain/inner", /not in a Git repository/], ["team/service/src", /not a Git top-level/],
+		["missing", /does not exist/], ["../outside", /\.\./], [child, /relative/], [".", /not in a Git repository/],
+	] as const) {
+		await assert.rejects(inspectGit(parent, { operation: "status", repo }), (error: Error) => message.test(error.message) && error.message.includes("git_read status repo"), repo);
+	}
+	await assert.rejects(inspectGit(parent, { operation: "status", repo: "" }), /git_read requires/);
+	await assert.rejects(inspectGit(parent, { operation: "status", repo: 1 }), /git_read requires/);
+	const outside = await mkdtemp(join(tmpdir(), "pi-subagent-git-read-outside-"));
+	t.after(() => rm(outside, { recursive: true, force: true }));
+	await symlink(outside, join(parent, "escape"));
+	await assert.rejects(inspectGit(parent, { operation: "status", repo: "escape" }), /outside/);
+});
+
+test("git_read accepts repo for every operation and keeps a repository cwd working", async (t) => {
+	const repo = await repository(t);
+	git(repo, "commit", "-q", "--allow-empty", "-m", "second");
+	const base = git(repo, "rev-parse", "HEAD~1");
+	const tip = git(repo, "rev-parse", "HEAD");
+	const output = async (params: unknown) => (await inspectGit(repo, params)).structuredContent.output;
+	assert.equal(await output({ operation: "status", repo: "." }), "");
+	assert.equal(await output({ operation: "diff", repo: ".", mode: "committed", base, tip }), "");
+	assert.match(await output({ operation: "show", repo: ".", path: "tracked.txt" }), /base/);
+	assert.match(await output({ operation: "log", repo: ".", maxCount: 1 }), /second/);
+	assert.match(await output({ operation: "blame", repo: ".", path: "tracked.txt" }), /base/);
+	assert.equal(await output({ operation: "rev-parse", repo: "." }), `${tip}\n`);
 });
 
 async function candidate(

@@ -1,6 +1,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawnBounded } from "@hcflabs/pi-process";
+import { gitTopLevel, resolveRepoTarget } from "@hcflabs/pi-repo";
 import { ROLE_TOOL_POLICY_FLAG, roleToolPolicyFromArgv } from "@hcflabs/pi-subagent";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
@@ -10,10 +11,11 @@ const TIMEOUT_MS = 30_000;
 const Parameters = Type.Object({
 	operation: StringEnum(["status", "diff", "show", "log", "blame", "rev-parse"]),
 	mode: Type.Optional(StringEnum(["working", "staged", "committed"], { description: "Diff only; defaults to working (unstaged). Committed requires base and tip." })),
+	repo: Type.Optional(Type.String({ minLength: 1, description: "Child Git repository as a path relative to the assigned cwd, such as team/service. Required when cwd is not a Git repository. Same rules as the delegate_task repo. Omit it to use cwd." })),
 	base: Type.Optional(Type.String()),
 	tip: Type.Optional(Type.String()),
 	revision: Type.Optional(Type.String({ description: "Commit ID or named ref with optional ~N/^N ancestry; defaults to HEAD. No ranges or reflog expressions." })),
-	path: Type.Optional(Type.String({ description: "One literal path relative to the assigned cwd; no absolute paths, traversal, or .git paths." })),
+	path: Type.Optional(Type.String({ description: "One literal path relative to the selected repo, or to the assigned cwd if repo is omitted; no absolute paths, traversal, or .git paths." })),
 	maxCount: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Log only; defaults to 20." })),
 	startLine: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000, description: "Blame only; supply both line bounds." })),
 	endLine: Type.Optional(Type.Integer({ minimum: 1, maximum: 1_000_000 })),
@@ -24,8 +26,8 @@ const Result = Type.Object({ output: Type.String(), stderr: Type.String(), trunc
 function parse(input: unknown): Params {
 	if (!Check(Parameters, input)) throw new Error("git_read requires a supported operation and valid structured parameters; arbitrary Git options are not accepted.");
 	const allowed: Record<Params["operation"], string[]> = {
-		status: ["path"], diff: ["mode", "base", "tip", "path"], show: ["revision", "path"],
-		log: ["revision", "path", "maxCount"], blame: ["revision", "path", "startLine", "endLine"], "rev-parse": ["revision"],
+		status: ["repo", "path"], diff: ["repo", "mode", "base", "tip", "path"], show: ["repo", "revision", "path"],
+		log: ["repo", "revision", "path", "maxCount"], blame: ["repo", "revision", "path", "startLine", "endLine"], "rev-parse": ["repo", "revision"],
 	};
 	for (const key of Object.keys(input)) {
 		if (key !== "operation" && !allowed[input.operation].includes(key)) throw new Error(`git_read ${input.operation} does not accept ${key}.`);
@@ -107,16 +109,39 @@ async function inspect(params: Params, cwd: string, signal?: AbortSignal): Promi
 	return { output: result.stdout, stderr: result.stderr, truncated: result.stdoutTruncated === true };
 }
 
+/** Run the operation in the selected repository root. Without repo, run in cwd and name repo if cwd is not a repository. */
+async function inspectIn(params: Params, cwd: string, signal?: AbortSignal): Promise<Static<typeof Result>> {
+	if (params.repo !== undefined) {
+		let root: string;
+		try {
+			root = (await resolveRepoTarget(cwd, params.repo, signal ? { signal } : {})).root;
+		} catch (error) {
+			throw new Error(`git_read ${params.operation} repo ${params.repo}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+		}
+		return await inspect(params, root, signal);
+	}
+	try {
+		return await inspect(params, cwd, signal);
+	} catch (error) {
+		// Git exit 128 is not specific to a missing repository. Ask pi-repo, which does not read Git messages.
+		const outside = signal?.aborted ? false : await gitTopLevel(cwd, signal ? { signal } : {}).then((root) => root === undefined, () => false);
+		if (outside) {
+			throw new Error(`git_read ${params.operation}: ${cwd} is not a Git repository. Set the repo parameter to a child Git repository, as a path relative to cwd, such as team/service.`, { cause: error });
+		}
+		throw error;
+	}
+}
+
 export default function gitRead(pi: ExtensionAPI): void {
 	// Like the MCP adapter, inspect argv because Pi binds extension flags after factories load.
 	if (!process.argv.includes(`--${ROLE_TOOL_POLICY_FLAG}`) || !roleToolPolicyFromArgv(process.argv).includes("git_read")) return;
 	pi.registerTool({
 		name: "git_read", label: "Git read",
-		description: "Bounded local Git evidence: status, working/staged or base-to-tip diff, show commit/file, log, blame, and rev-parse commit lookup. Fixed read-only operations; no shell/options, network, tests, or mutations. Paths are relative to cwd. Output retains at most the last 32 KiB; narrow path/ref/line scope if truncated. Each call has a 30-second timeout.",
+		description: "Read bounded local Git evidence: status, working or staged diff, base-to-tip diff, show of a commit or file, log, blame, and rev-parse of a commit. The operations are fixed and read-only. The tool accepts no shell, no options, no network, no tests, and no changes. If cwd is not a Git repository, set repo to a child Git repository, as a path relative to cwd. Paths are relative to the selected repo, or to cwd if repo is omitted. The tool keeps at most the last 32 KiB of output. If the output is truncated, narrow the path, ref, or line scope. Each call has a 30-second timeout.",
 		parameters: Parameters,
 		outputSchema: Result,
 		async execute(_id, input, signal, _update, ctx) {
-			const result = await inspect(parse(input), ctx.cwd, signal);
+			const result = await inspectIn(parse(input), ctx.cwd, signal);
 			return {
 				content: [{ type: "text", text: `${result.truncated ? "[TRUNCATED: only the last 32768 bytes follow; narrow the request.]\n" : ""}${result.output}${result.stderr ? `\nGit diagnostic: ${result.stderr}` : ""}` }],
 				structuredContent: result, details: result,

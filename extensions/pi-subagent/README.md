@@ -41,7 +41,7 @@ Commands, prompts, and UI are for you. Tools and the packaged skill are for Main
 | `subagent_stage` | tool | Stage, resolve, reject, or revise an exact candidate. Rejecting a staged candidate freezes its generation. |
 | `subagent_integrate` | tool | Advance dependents, refresh, validate, correct, promote, reconcile, clean up promotion, or release rejected and superseded resources. |
 | `subagent_abort` | tool | Terminate an isolated request without discarding retained work. Retained candidates and integration work require release or proof of absence. |
-| `git_read` | tool | Let Role-declared children inspect bounded local Git evidence without Bash, tests, network access, or writes. Not available to Main. |
+| `git_read` | tool | Let Role-declared children inspect bounded local Git evidence without Bash, tests, network access, or writes. In a parent directory that is not a Git repository, the optional `repo` parameter selects a child repository. Not available to Main. |
 | `pi-subagent` | skill | Guide Main through authorization, delegation, checks, integration, and recovery. |
 | Direct status widget (`D`) | ui | Show direct workflows as a tree under `Main` with references, names, Role badges, status, routes, elapsed time, measured task tokens, cost, and tool activity. In fullscreen mode, a click on a working or finished worker row focuses that worker's verified Herdr pane. |
 | Isolated status widget (`I`) | ui | Show recorded task state, Role/model-class badges, and retained workspaces in the TUI. Readiness does not mean promotion. |
@@ -107,6 +107,8 @@ When Pi runs in a parent directory that holds many repositories, set `repo` to s
 `repo` is a path relative to the Pi working directory. It must be a Git top-level directory, must not contain `..`, and must not resolve outside that directory. A subdirectory of a repository fails. No tool selects a child repository automatically.
 
 The worker opens in the current Herdr workspace with the Repository target as its working directory. Change reports and stale-read checks use that checkout, and each result names its `repo`. A write request reserves the checkout of each target at one time, so writers in different repositories can run together. When Pi runs in a parent directory that is not a Git repository, each Main call that can write covers the whole parent. Such a call waits while a direct writer owns the checkout of any Repository target in it. Main can still read files and use `subagent_repos`.
+
+A worker that uses `repo` starts in the Repository target, so `git_read` needs no `repo`. A worker that starts in a parent directory that is not a Git repository must pass `repo` to `git_read`, with the same selector rules. Without `repo`, `git_read` fails with a message that names `repo`.
 
 A `herdr_command` job with write access blocks direct writers in its checkout until `stop` proves that the job ended.
 
