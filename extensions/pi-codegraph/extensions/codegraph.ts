@@ -1,9 +1,10 @@
-import { mkdir, readFile, rm, rmdir, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, realpath, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { backup, DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { recordDiagnostic, registerDiagnosticsCommand } from "@hcflabs/pi-config-store";
+import { discoverRepos, gitTopLevel, type RepoOptions } from "@hcflabs/pi-repo";
 import { Type } from "typebox";
 
 const LOCK_WAIT_MS = 5 * 60_000;
@@ -13,6 +14,9 @@ const STATUS_KEY = "pi-codegraph";
 const MCP_SERVER = "pi-codegraph";
 const SPINNER_INTERVAL_MS = 100;
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const LISTED_REPOS = 10;
+const DISCOVERY_BUDGET_MS = 10_000;
+const NO_REPO_NOTICE = "pi-codegraph: this directory is not in a Git repository. Setup is skipped. Pass projectPath to codegraph_explore to use an indexed repository.";
 
 function showProgress(ctx: ExtensionContext, action: string, signal: AbortSignal): () => void {
 	if (!ctx.hasUI) return () => {};
@@ -34,6 +38,11 @@ function showProgress(ctx: ExtensionContext, action: string, signal: AbortSignal
 	};
 	signal.addEventListener("abort", stop, { once: true });
 	return stop;
+}
+
+// Runs the Git calls of pi-repo through Pi, so they share its cancellation.
+function piExec(pi: ExtensionAPI): NonNullable<RepoOptions["runProcess"]> {
+	return (command, args, { cwd, signal, timeoutMs }) => pi.exec(command, args, { cwd, signal, ...(timeoutMs ? { timeout: timeoutMs } : {}) });
 }
 
 async function hasIndex(root: string): Promise<boolean> {
@@ -199,8 +208,50 @@ async function git(pi: ExtensionAPI, cwd: string, args: string[], signal: AbortS
 	return result.stdout.replace(/\r?\n$/, "");
 }
 
+// Lists up to LISTED_REPOS repositories below `base` that have an index, for the error of codegraph_explore.
+async function indexedRepos(pi: ExtensionAPI, base: string, signal: AbortSignal | undefined): Promise<string[]> {
+	let found;
+	try {
+		found = await discoverRepos(base, { runProcess: piExec(pi), signal, budgetMs: DISCOVERY_BUDGET_MS });
+	} catch (error) {
+		signal?.throwIfAborted();
+		return [`Cannot list the repositories below ${base}: ${error instanceof Error ? error.message : String(error)}`];
+	}
+	const indexed: string[] = [];
+	for (const { root } of found.repos) {
+		if (await hasIndex(root).catch(() => false)) indexed.push(root);
+	}
+	const limited = found.truncated ? " The search stopped at a limit, so the list can be incomplete." : "";
+	if (!indexed.length) return [`No indexed repository found below ${base}.${limited}`];
+	return [
+		`Indexed repositories below ${base}:`,
+		...indexed.slice(0, LISTED_REPOS).map((root) => `- ${root}`),
+		...(indexed.length > LISTED_REPOS ? [`${indexed.length - LISTED_REPOS} more not shown.`] : []),
+		...(limited ? [limited.trim()] : []),
+	];
+}
+
+// Resolves projectPath (or the session directory) to the Git top level that holds the index.
+async function exploreRoot(pi: ExtensionAPI, cwd: string, projectPath: string | undefined, signal: AbortSignal | undefined): Promise<string> {
+	const start = resolve(cwd, projectPath ?? ".");
+	const advice = "Pass projectPath with the absolute path of an indexed repository.";
+	const info = await stat(start).catch((error: NodeJS.ErrnoException) => {
+		if (error.code === "ENOENT" || error.code === "ENOTDIR") return undefined;
+		throw error;
+	});
+	if (!info?.isDirectory()) throw new Error(`${start} is not an existing directory. ${advice}`);
+	const root = await gitTopLevel(start, { runProcess: piExec(pi), signal });
+	signal?.throwIfAborted();
+	if (root !== undefined && await hasIndex(root)) return root;
+	const problem = root === undefined
+		? `${start} is not in a Git repository.`
+		: `${root} has no CodeGraph index (.codegraph/codegraph.db is missing). To index it, run codegraph init --yes there.`;
+	throw new Error([`codegraph_explore needs an indexed Git repository. ${problem}`, advice, ...await indexedRepos(pi, cwd, signal)].join("\n"));
+}
+
 // Resolves to the worktree root when it has an index.
-async function initialize(pi: ExtensionAPI, ctx: ExtensionContext, signal: AbortSignal): Promise<string | undefined> {
+// `onNoRepo` runs when the session directory is not in a Git repository.
+async function initialize(pi: ExtensionAPI, ctx: ExtensionContext, signal: AbortSignal, onNoRepo: () => void): Promise<string | undefined> {
 	ctx.ui.setStatus(STATUS_KEY, undefined);
 	const version = await pi.exec("codegraph", ["--version"], { cwd: ctx.cwd, timeout: 10_000, signal });
 	signal.throwIfAborted();
@@ -212,14 +263,14 @@ async function initialize(pi: ExtensionAPI, ctx: ExtensionContext, signal: Abort
 		if (ctx.hasUI) ctx.ui.notify(message, "warning");
 		return;
 	}
-	const rootResult = await pi.exec("git", ["rev-parse", "--show-toplevel"], { cwd: ctx.cwd, timeout: 10_000, signal });
-	signal.throwIfAborted();
-	if (rootResult.code !== 0 || rootResult.killed) {
-		if (!rootResult.killed && rootResult.stderr.includes("not a git repository")) return;
-		throw new Error(`Cannot locate Git worktree: ${rootResult.stderr.trim() || `exit ${rootResult.code}`}`);
+	// A parent directory of repositories is not a repository. Setup never indexes the repositories below it.
+	const root = await gitTopLevel(ctx.cwd, { runProcess: piExec(pi), signal });
+	if (root === undefined) {
+		onNoRepo();
+		return;
 	}
-	const root = rootResult.stdout.replace(/\r?\n$/, "");
-	if (!root) throw new Error("Git returned an empty worktree root.");
+	// The top level is above the session directory in a subdirectory or in a plain directory of an outer repository.
+	const above = root !== await realpath(ctx.cwd);
 	if (process.env.CODEGRAPH_DIR && process.env.CODEGRAPH_DIR !== ".codegraph") {
 		throw new Error("pi-codegraph requires the default CODEGRAPH_DIR (.codegraph). Unset CODEGRAPH_DIR before launching Pi.");
 	}
@@ -236,9 +287,11 @@ async function initialize(pi: ExtensionAPI, ctx: ExtensionContext, signal: Abort
 		const primary = first[0].slice("worktree ".length);
 		const paths = worktrees.split("\0").filter((line) => line.startsWith("worktree ")).map((line) => line.slice("worktree ".length));
 		const commonDir = await git(pi, root, ["rev-parse", "--path-format=absolute", "--git-common-dir"], signal);
+		// A bare repository has no primary checkout to index. In a submodule, Git lists the Git directory as the primary worktree.
+		const checkout = !first.includes("bare") && resolve(primary) !== resolve(commonDir);
 		// Ask before taking the lock, so an open dialog neither blocks other sessions nor leaves a stale lock.
-		// A bare repository has no primary checkout to index.
-		const accepted = primary !== root && !first.includes("bare") && !(await hasIndex(root)) && !(await hasIndex(primary))
+		// Never ask from below the top level: the session directory can be a plain directory in an unrelated outer repository.
+		const accepted = checkout && primary !== root && !above && !(await hasIndex(root)) && !(await hasIndex(primary))
 			&& await acceptPrimaryIndex(ctx, commonDir, primary, signal);
 		await acquireLock(lock, recovery, signal, () => { stopProgress = showProgress(ctx, "waiting for index", signal); });
 		let attempted = false;
@@ -247,7 +300,7 @@ async function initialize(pi: ExtensionAPI, ctx: ExtensionContext, signal: Abort
 				indexed = true;
 				return root;
 			}
-			if (primary === root || first.includes("bare")) return;
+			if (primary === root || !checkout) return;
 			const primaryIndexed = await hasIndex(primary);
 			if (!primaryIndexed && !accepted) return;
 			stopProgress();
@@ -293,6 +346,7 @@ export default function codegraphExtension(pi: ExtensionAPI): void {
 	registerDiagnosticsCommand(pi);
 	let initializer: AbortController | undefined;
 	let setup: Promise<void> | undefined;
+	let noRepoNoticed = false;
 	pi.on("session_shutdown", (event) => {
 		// Session replacement waits for worktree-scoped indexing instead of abandoning its lock.
 		if (event.reason !== "new" && event.reason !== "resume" && event.reason !== "fork") initializer?.abort();
@@ -301,16 +355,16 @@ export default function codegraphExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "codegraph_explore",
 		label: "CodeGraph explore",
-		description: "Primary code exploration tool. Call it first for how-does-X-work, architecture, bug, or where-is-X questions, and before editing. Returns the verbatim source of the relevant symbols grouped by file, plus the call path among them, in one capped call. Treat the shown source as already read.",
+		description: "Primary code exploration tool. Call it first for how-does-X-work, architecture, bug, or where-is-X questions, and before editing. Returns the verbatim source of the relevant symbols grouped by file, plus the call path among them, in one capped call. Treat the shown source as already read. It needs an indexed Git repository: pass projectPath when the session cwd is not inside one.",
 		parameters: Type.Object({
 			query: Type.String({ description: "Symbol names, file names, short code terms, or a natural-language question." }),
 			maxFiles: Type.Optional(Type.Number({ description: "Maximum files to include (default 12)." })),
-			projectPath: Type.Optional(Type.String({ description: "Absolute path to the project or any directory inside it. Defaults to the session cwd." })),
+			projectPath: Type.Optional(Type.String({ description: "Absolute path to an indexed Git repository or any directory inside it. Defaults to the session cwd. Required when the session cwd is not inside an indexed repository." })),
 		}),
 		annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 		async execute(_toolCallId, { query, maxFiles, projectPath }, signal, _onUpdate, ctx) {
-			const path = projectPath ?? ctx.cwd;
-			const result = await pi.exec("codegraph", ["explore", "--path", path, "--max-files", String(maxFiles ?? 12), query], { cwd: path, signal, timeout: EXPLORE_TIMEOUT_MS });
+			const root = await exploreRoot(pi, ctx.cwd, projectPath, signal);
+			const result = await pi.exec("codegraph", ["explore", "--path", root, "--max-files", String(maxFiles ?? 12), query], { cwd: root, signal, timeout: EXPLORE_TIMEOUT_MS });
 			if (result.code !== 0 || result.killed) {
 				throw new Error(`codegraph explore failed (${result.killed ? "timed out or killed" : `exit ${result.code}`}): ${result.stderr.trim().slice(-2000)}`);
 			}
@@ -329,7 +383,13 @@ export default function codegraphExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		if (setup) return ctx.mode === "tui" ? undefined : setup;
 		const controller = initializer = new AbortController();
-		setup = initialize(pi, ctx, controller.signal).then(watch).catch((error) => {
+		const noRepo = () => {
+			// One short notice for the whole run, not one for each session start.
+			if (noRepoNoticed || !ctx.hasUI) return;
+			noRepoNoticed = true;
+			ctx.ui.notify(NO_REPO_NOTICE, "info");
+		};
+		setup = initialize(pi, ctx, controller.signal, noRepo).then(watch).catch((error) => {
 			if (controller.signal.aborted) return;
 			// Do not keep watching the checkout of an earlier session.
 			watch(undefined);

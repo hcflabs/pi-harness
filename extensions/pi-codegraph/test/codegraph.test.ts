@@ -390,7 +390,8 @@ test("does not index non-Git directories, unopted repositories, or existing inde
 		const run = harness(cwd);
 		await run.start();
 		assert.equal(run.calls.some(({ command, args }) => command === "codegraph" && args[0] === "init"), false);
-		assert.deepEqual(run.notices, []);
+		// A non-Git directory gets one short notice and no badge.
+		assert.deepEqual(run.notices.map(({ level }) => level), cwd === base ? ["info"] : []);
 		assert.equal(run.statuses.at(-1), cwd === base ? undefined : "<dim>○</dim> CG");
 	}
 	await index(worktree);
@@ -513,22 +514,164 @@ test("rejects an alternate CODEGRAPH_DIR instead of indexing a different directo
 	assert.equal(run.calls.some(({ command, args }) => command === "codegraph" && args[0] === "init"), false);
 });
 
-test("codegraph_explore passes the query, file cap, and project path to the CLI", async () => {
-	const run = harness("/session");
+async function scratch(t: TestContext) {
+	const base = await realpath(await mkdtemp(join(tmpdir(), "pi-codegraph-parent-")));
+	t.after(() => rm(base, { recursive: true, force: true }));
+	return base;
+}
+
+async function repository(dir: string, indexed: boolean) {
+	await mkdir(dir, { recursive: true });
+	await exec("git", ["init", "-q", dir]);
+	if (indexed) await index(dir);
+	return dir;
+}
+
+test("codegraph_explore passes the query, file cap, and repository root to the CLI", async (t) => {
+	const base = await scratch(t);
+	const repo = await repository(join(base, "repo"), true);
+	await mkdir(join(repo, "src"));
+	const run = harness(repo);
 	assert.equal(run.tool.name, "codegraph_explore");
 	assert.deepEqual(await run.explore({ query: "how does init work" }), { content: [{ type: "text", text: "explored" }], details: undefined });
-	await run.explore({ query: "initialize", maxFiles: 3, projectPath: "/project/src" });
-	assert.deepEqual(run.calls, [
-		{ command: "codegraph", args: ["explore", "--path", "/session", "--max-files", "12", "how does init work"], cwd: "/session", timeout: 120_000 },
-		{ command: "codegraph", args: ["explore", "--path", "/project/src", "--max-files", "3", "initialize"], cwd: "/project/src", timeout: 120_000 },
+	// A directory inside the repository resolves to the Git top level that holds the index.
+	await run.explore({ query: "initialize", maxFiles: 3, projectPath: join(repo, "src") });
+	assert.deepEqual(run.calls.filter(({ command }) => command === "codegraph"), [
+		{ command: "codegraph", args: ["explore", "--path", repo, "--max-files", "12", "how does init work"], cwd: repo, timeout: 120_000 },
+		{ command: "codegraph", args: ["explore", "--path", repo, "--max-files", "3", "initialize"], cwd: repo, timeout: 120_000 },
 	]);
 });
 
-test("codegraph_explore surfaces the CLI stderr tail on failure", async () => {
-	const run = harness("/session", { explore: { code: 1, stdout: "", stderr: `${"x".repeat(3000)}CodeGraph not initialized\n`, killed: false } });
+test("codegraph_explore surfaces the CLI stderr tail on failure", async (t) => {
+	const repo = await repository(join(await scratch(t), "repo"), true);
+	const run = harness(repo, { explore: { code: 1, stdout: "", stderr: `${"x".repeat(3000)}CodeGraph not initialized\n`, killed: false } });
 	await assert.rejects(run.explore({ query: "q" }), (error: Error) => {
 		assert.match(error.message, /^codegraph explore failed \(exit 1\): x+CodeGraph not initialized$/);
 		assert.ok(error.message.length < 2100);
 		return true;
 	});
+});
+
+test("codegraph_explore in a non-Git parent directory names the indexed repositories below it", async (t) => {
+	const base = await scratch(t);
+	const api = await repository(join(base, "api"), true);
+	const web = await repository(join(base, "team", "web"), true);
+	const docs = await repository(join(base, "docs"), false);
+	const run = harness(base);
+	await assert.rejects(run.explore({ query: "q" }), (error: Error) => {
+		assert.match(error.message, /is not in a Git repository/);
+		assert.match(error.message, /Pass projectPath/);
+		assert.ok(error.message.includes(api) && error.message.includes(web));
+		assert.equal(error.message.includes(docs), false);
+		return true;
+	});
+	assert.equal(run.calls.some(({ args }) => args[0] === "explore"), false);
+	// The list is bounded.
+	for (let n = 0; n < 12; n++) await repository(join(base, "many", `r${String(n).padStart(2, "0")}`), true);
+	await assert.rejects(run.explore({ query: "q" }), (error: Error) => {
+		assert.equal(error.message.split("\n").filter((line) => line.startsWith("- ")).length, 10);
+		assert.match(error.message, /4 more/);
+		return true;
+	});
+});
+
+test("codegraph_explore does not use the outer repository of a plain directory", async (t) => {
+	const base = await scratch(t);
+	const outer = await repository(join(base, "outer"), false);
+	const child = await repository(join(outer, "code", "api"), true);
+	const run = harness(join(outer, "code"));
+	await assert.rejects(run.explore({ query: "q" }), (error: Error) => {
+		assert.ok(error.message.includes(`${outer} has no CodeGraph index`));
+		assert.match(error.message, /Pass projectPath/);
+		assert.ok(error.message.includes(child));
+		return true;
+	});
+	assert.equal(run.calls.some(({ args }) => args[0] === "explore"), false);
+	// A projectPath that names the indexed repository works from the same session.
+	await run.explore({ query: "q", projectPath: child });
+	assert.deepEqual(run.calls.filter(({ args }) => args[0] === "explore").map(({ args }) => args[2]), [child]);
+});
+
+test("codegraph_explore reports a repository without an index and a bad projectPath", async (t) => {
+	const base = await scratch(t);
+	const bare = await repository(join(base, "unindexed"), false);
+	const run = harness(bare);
+	await assert.rejects(run.explore({ query: "q" }), (error: Error) => {
+		assert.ok(error.message.includes(`${bare} has no CodeGraph index`));
+		assert.match(error.message, /No indexed repository found below/);
+		return true;
+	});
+	await assert.rejects(run.explore({ query: "q", projectPath: join(base, "missing") }), /missing is not an existing directory/);
+	await writeFile(join(base, "file.txt"), "");
+	await assert.rejects(run.explore({ query: "q", projectPath: join(base, "file.txt") }), /file\.txt is not an existing directory/);
+	assert.equal(run.calls.some(({ args }) => args[0] === "explore"), false);
+});
+
+test("session setup in a non-Git parent directory shows one short notice and indexes no child repository", async (t) => {
+	const base = await scratch(t);
+	await repository(join(base, "api"), true);
+	await repository(join(base, "docs"), false);
+	const run = harness(base, { mode: "tui", confirm: true });
+	run.start();
+	await run.shutdown("new");
+	run.start();
+	await run.shutdown("new");
+	assert.equal(run.notices.length, 1);
+	assert.equal(run.notices[0]!.level, "info");
+	assert.match(run.notices[0]!.message, /not in a Git repository/);
+	assert.match(run.notices[0]!.message, /projectPath/);
+	assert.ok(run.notices[0]!.message.length < 200);
+	assert.deepEqual(run.prompts, []);
+	assert.equal(run.calls.some(({ command, args }) => command === "codegraph" && args[0] !== "--version"), false);
+	assert.equal(run.servers.size, 0);
+	assert.equal(run.statuses.at(-1), undefined);
+	const headless = harness(base, { hasUI: false });
+	await headless.start();
+	assert.deepEqual(headless.notices, []);
+});
+
+test("session setup does not read Git messages to find a non-Git directory", async (t) => {
+	const base = await scratch(t);
+	// Git prints this text with a German locale.
+	const run = harness(base, { gitProbe: async (args) => args.includes("--show-toplevel")
+		? { code: 128, stdout: "", stderr: "fatal: kein Git-Repository (oder irgendein Elternverzeichnis bis zum Einhängepunkt): .git", killed: false } : undefined });
+	await run.start();
+	assert.deepEqual(run.notices.map(({ level }) => level), ["info"]);
+	assert.equal(run.statuses.at(-1), undefined);
+});
+
+test("session setup does not offer to index the outer repository of a plain directory", async (t) => {
+	const { primary, worktree } = await fixture(t);
+	const plain = join(worktree, "plain");
+	await mkdir(plain);
+	const run = harness(plain, { mode: "tui", confirm: true });
+	run.start();
+	await run.shutdown("new");
+	assert.deepEqual(run.prompts, []);
+	assert.equal(run.calls.some(({ command, args }) => command === "codegraph" && args[0] === "init"), false);
+	assert.equal(run.statuses.at(-1), "<dim>○</dim> CG");
+	await assert.rejects(stat(join(primary, ".codegraph")), { code: "ENOENT" });
+});
+
+test("a submodule never offers to index its Git directory", async (t) => {
+	const base = await scratch(t);
+	const upstream = await repository(join(base, "upstream"), false);
+	await exec("git", ["-C", upstream, "-c", "user.name=Test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "commit", "--allow-empty", "-qm", "initial"]);
+	const parent = await repository(join(base, "parent"), false);
+	await exec("git", ["-C", parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", upstream, "mod"]);
+	const module = join(parent, "mod");
+	const gitDir = (await exec("git", ["-C", module, "rev-parse", "--absolute-git-dir"])).stdout.trim();
+	const run = harness(module, { mode: "tui", confirm: true });
+	run.start();
+	await run.shutdown("new");
+	assert.deepEqual(run.prompts, []);
+	assert.equal(run.calls.some(({ command, args }) => command === "codegraph" && args[0] === "init"), false);
+	await assert.rejects(stat(join(gitDir, ".codegraph")), { code: "ENOENT" });
+	assert.equal(run.statuses.at(-1), "<dim>○</dim> CG");
+	// An index in the submodule checkout is used as usual.
+	await index(module);
+	const indexed = harness(module);
+	await indexed.start();
+	assert.equal(indexed.statuses.at(-1), "<success>✓</success> CG");
+	assert.deepEqual(indexed.servers.get("pi-codegraph"), { command: "codegraph", args: ["serve", "--mcp", "--path", module], cwd: module, exposure: "hidden" });
 });
