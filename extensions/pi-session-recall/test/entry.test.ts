@@ -733,7 +733,7 @@ describe("session_search entry point", () => {
 			assert.equal(first.content[0].text, second.content[0].text, "repeated preparation must serialize identically");
 			const prepared = structured(tool, first);
 
-			assert.deepEqual(prepared.scope, { kind: "repository", gitRoot: fs.realpathSync(root), requestedLimit: 5, sampledCount: 5 });
+			assert.deepEqual(prepared.scope, { kind: "repository", gitRoot: fs.realpathSync(root), root: fs.realpathSync(root), requestedLimit: 5, sampledCount: 5 });
 			assert.deepEqual(prepared.sync, { walkComplete: true, backlogRemaining: 0, complete: true });
 			assert.deepEqual(prepared.sessions.map((session: { path: string }) => session.path), [currentChild, outsideChild, exact, parent, descendant]);
 			assert.ok(prepared.sessions.every((session: { cwd: string }) => session.cwd === root || session.cwd.startsWith(`${root}${path.sep}`)));
@@ -793,7 +793,7 @@ describe("session_search entry point", () => {
 		}
 	});
 
-	it("rejects preparation parameter conflicts and handles both scopes outside Git", async () => {
+	it("rejects preparation parameter conflicts and handles all scope outside Git", async () => {
 		clearRecallState();
 		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-recall-entry-not-git-"));
 		try {
@@ -808,15 +808,10 @@ describe("session_search entry point", () => {
 
 			const global = structured(tool, await tool.execute("all", { operation: "prepare-pattern-miner", scope: "all" }, undefined, undefined, context));
 			assert.equal(global.mode, "prepare-pattern-miner");
-			assert.deepEqual(global.scope, { kind: "all", gitRoot: null, requestedLimit: 10, sampledCount: 1 });
+			assert.deepEqual(global.scope, { kind: "all", gitRoot: null, root: null, requestedLimit: 10, sampledCount: 1 });
 			assert.equal(global.inventory.available, false);
 			assert.equal(global.inventory.reason, "not-a-git-repository");
 			assert.equal(global.sessions.length, 1);
-
-			await assert.rejects(
-				tool.execute("repository", { operation: "prepare-pattern-miner", scope: "repository" }, undefined, undefined, context),
-				/requires a Git repository/,
-			);
 
 			const conflicts = [
 				{ query: "x" },
@@ -836,6 +831,50 @@ describe("session_search entry point", () => {
 			}
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("samples the cwd subtree for repository scope outside Git", { skip: process.platform === "win32" }, async () => {
+		clearRecallState();
+		const parent = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-recall-entry-parent-")));
+		const link = path.join(os.tmpdir(), `pi-session-recall-entry-parent-link-${process.pid}-${Date.now()}`);
+		fs.symlinkSync(parent, link);
+		try {
+			const exact = writeSimpleSession("prepare-parent/exact.jsonl", {
+				id: "exact", cwd: parent, timestamp: "2026-03-03T00:04:00.000Z", text: "parent exact",
+			});
+			const below = writeSimpleSession("prepare-parent/below.jsonl", {
+				id: "below", cwd: path.join(parent, "repo-a", "src"), timestamp: "2026-03-03T00:03:00.000Z", text: "repo a work",
+			});
+			const viaLink = writeSimpleSession("prepare-parent/via-link.jsonl", {
+				id: "via-link", cwd: path.join(link, "repo-b"), timestamp: "2026-03-03T00:02:00.000Z", text: "repo b through a symlink",
+			});
+			writeSimpleSession("prepare-parent/sibling.jsonl", {
+				id: "sibling", cwd: `${parent}-sibling`, timestamp: "2026-03-03T00:05:00.000Z", text: "prefix sibling",
+			});
+			writeSimpleSession("prepare-parent/outside.jsonl", {
+				id: "outside", cwd: path.join(os.tmpdir(), "elsewhere"), timestamp: "2026-03-03T00:06:00.000Z", text: "outside",
+			});
+			const pi = makePi();
+			const { default: register } = await import(`../extensions/session-recall.ts?bust=${Date.now()}-prepare-parent`);
+			register(pi as never);
+			const tool = (pi as any).tool as CapturedTool;
+			const run = async (cwd: string) => structured(tool, await tool.execute(
+				"parent", { operation: "prepare-pattern-miner", scope: "repository" }, undefined, undefined,
+				{ cwd, sessionManager: { getSessionFile: () => undefined } },
+			));
+
+			for (const cwd of [parent, link]) {
+				const prepared = await run(cwd);
+				assert.deepEqual(prepared.scope, { kind: "repository", gitRoot: null, root: parent, requestedLimit: 10, sampledCount: 3 });
+				assert.deepEqual(prepared.sessions.map((session: { path: string }) => session.path), [exact, below, viaLink]);
+				assert.equal(prepared.inventory.available, false);
+				assert.equal(prepared.inventory.reason, "not-a-git-repository");
+				assert.equal(prepared.inventory.worktreeVerified, false);
+			}
+		} finally {
+			fs.rmSync(link, { force: true });
+			fs.rmSync(parent, { recursive: true, force: true });
 		}
 	});
 

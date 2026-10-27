@@ -1,6 +1,6 @@
 {
   "name": "@hcflabs/pi-notes",
-  "version": "3.2.4",
+  "version": "3.2.5",
   "description": "Persistent notes in a Pi widget, managed with /note commands.",
   "keywords": [
     "pi-package",
@@ -46,7 +46,8 @@
     "image": "https://raw.githubusercontent.com/hcflabs/pi-harness/main/extensions/pi-notes/example.png"
   },
   "dependencies": {
-    "@hcflabs/pi-config-store": "^4.0.0"
+    "@hcflabs/pi-config-store": "^4.0.0",
+    "@hcflabs/pi-repo": "^0.1.0"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "1.3.0",

@@ -35,13 +35,13 @@ Commands, prompts, and UI are for you. Tools and the packaged skill are for Main
 | `/review [target] [focus]` | prompt | Tell Main to review a change with parallel `reviewer` tasks and give one ship verdict. See [Review a change](#review-a-change). |
 | `/subagent recover` | command | Classify interrupted isolated work in the canonical repository. Send Main request IDs, blockers, and next actions. Requires no UI or Herdr pane. |
 | `delegate_task` | tool | Start authorized shared-checkout work or a durable isolated checked graph. With `dryRun: true`, check the request and show the resolved plan without a launch. |
-| `subagent_repos` | tool | List the child Git repositories below the Pi working directory and the `repo` selector of each. Read-only. |
+| `subagent_repos` | tool | List the child Git repositories below the Pi working directory and the `repo` selector of each. Mark linked worktrees and submodules. Read-only. |
 | `subagent_status` | tool | Read saved isolated state, exact identities, failed review verdicts, and allowed continuation. Does not replay work. Supports structured output for `codemode`. |
 | `subagent_resume` | tool | Perform the reported `retry`, `verify`, or `finalize` continuation, not staging or integration. Same-worker correction retries accept optional `instruction` text. `verify` can also adopt a later clean committed candidate from the same settled worker. That candidate must pass its normal checks and judgment. |
 | `subagent_stage` | tool | Stage, resolve, reject, or revise an exact candidate. Rejecting a staged candidate freezes its generation. |
 | `subagent_integrate` | tool | Advance dependents, refresh, validate, correct, promote, reconcile, clean up promotion, or release rejected and superseded resources. |
 | `subagent_abort` | tool | Terminate an isolated request without discarding retained work. Retained candidates and integration work require release or proof of absence. |
-| `git_read` | tool | Let Role-declared children inspect bounded local Git evidence without Bash, tests, network access, or writes. Not available to Main. |
+| `git_read` | tool | Let Role-declared children inspect bounded local Git evidence without Bash, tests, network access, or writes. In a parent directory that is not a Git repository, the optional `repo` parameter selects a child repository. Not available to Main. |
 | `pi-subagent` | skill | Guide Main through authorization, delegation, checks, integration, and recovery. |
 | Direct status widget (`D`) | ui | Show direct workflows as a tree under `Main` with references, names, Role badges, status, routes, elapsed time, measured task tokens, cost, and tool activity. In fullscreen mode, a click on a working or finished worker row focuses that worker's verified Herdr pane. |
 | Isolated status widget (`I`) | ui | Show recorded task state, Role/model-class badges, and retained workspaces in the TUI. Readiness does not mean promotion. |
@@ -108,13 +108,19 @@ When Pi runs in a parent directory that holds many repositories, set `repo` to s
 
 The worker opens in the current Herdr workspace with the Repository target as its working directory. Change reports and stale-read checks use that checkout, and each result names its `repo`. A write request reserves the checkout of each target at one time, so writers in different repositories can run together. When Pi runs in a parent directory that is not a Git repository, each Main call that can write covers the whole parent. Such a call waits while a direct writer owns the checkout of any Repository target in it. Main can still read files and use `subagent_repos`.
 
+A worker that uses `repo` starts in the Repository target, so `git_read` needs no `repo`. A worker that starts in a parent directory that is not a Git repository must pass `repo` to `git_read`, with the same selector rules. Without `repo`, `git_read` fails with a message that names `repo`.
+
 A `herdr_command` job with write access blocks direct writers in its checkout until `stop` proves that the job ended.
 
 An isolated request accepts one `repo` for the whole graph. Tasks cannot select another repository. The request then uses the Repository target as its checkout. State, worker worktrees, validation, and promotion belong to that repository. The Pi working directory does not change.
 
 Your Herdr workspace can belong to another checkout or to none. Herdr opens the primary workspace of the target when it opens the first worker worktree, and it does not close that workspace later. Pass the same `repo` to `subagent_status`, `subagent_resume`, `subagent_stage`, `subagent_integrate`, and `subagent_abort`.
 
-Run `/subagent` in a parent directory that is not a Git repository. It lists the isolated requests of each Repository target below it, with their `repo`. `/subagent recover` recovers each Repository target that has saved requests. `/subagent prune` still needs a Git checkout.
+Run `/subagent` in a parent directory that is not a Git repository. It lists the isolated requests of each Repository target below it, with their `repo`. `/subagent recover` recovers each Repository target that has saved requests. `/subagent prune` reviews the leftovers of each Repository target and prefixes each item with its `repo`.
+
+The same commands work in a plain subdirectory of a Git repository. They then read the repository that contains the directory, and also each Repository target below the directory. Items of the outer repository have no `repo`. At the top level of a repository, the commands read only that repository.
+
+Discovery searches 3 directory levels. It also lists repositories inside repositories, such as submodules. When a directory at the depth limit has child directories, or another limit stops the search, `subagent_repos` and these commands show a warning. A warning means that some repositories were not examined.
 
 To continue a finished worker, add `"continueFrom": "D7.1"` with the same `role`. This opens a new tab with the saved conversation and a new reference. Continue the newest reference from the original checkout and workspace. For a worker that ran with `repo`, select the same `repo`. For eligibility and stop behavior, see [Continue or stop one direct worker](./docs/orchestration.md#continue-or-stop-one-direct-worker).
 

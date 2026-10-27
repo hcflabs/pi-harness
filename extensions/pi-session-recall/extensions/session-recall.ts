@@ -194,6 +194,7 @@ function buildPreparationResult(
 	kind: "repository" | "all",
 	requestedLimit: number,
 	gitRoot: string | undefined,
+	root: string | undefined,
 	syncResult: ReturnType<typeof syncSessions>,
 	rows: PreparationSessionRow[],
 	repositoryInventory: RepositoryInventory,
@@ -211,7 +212,7 @@ function buildPreparationResult(
 		contentTruncated: boolean,
 	) => ({
 		mode: "prepare-pattern-miner",
-		scope: { kind, gitRoot: gitRoot ?? null, requestedLimit, sampledCount: preparedSessions.length },
+		scope: { kind, gitRoot: gitRoot ?? null, root: root ?? null, requestedLimit, sampledCount: preparedSessions.length },
 		sync,
 		sessions: preparedSessions,
 		inventory,
@@ -302,6 +303,7 @@ const OUTPUT_SCHEMA = Type.Union([
 		scope: Type.Object({
 			kind: StringEnum(["repository", "all"] as const),
 			gitRoot: Nullable(Type.String()),
+			root: Nullable(Type.String()),
 			requestedLimit: Type.Number(),
 			sampledCount: Type.Number(),
 		}),
@@ -351,6 +353,7 @@ const OUTPUT_SCHEMA = Type.Union([
 const DESCRIPTION = `Search past Pi sessions locally with FTS5; returns indexed metadata and snippets.
 
 - \`operation: "prepare-pattern-miner"\` + \`scope\`: prepare one bounded corpus and repository inventory.
+  \`repository\` samples sessions in the Git root. Outside Git, it samples sessions in the current directory and below, and the inventory is unavailable. \`scope.root\` names the directory used. \`all\` samples every session.
 - \`query\`: discover matches. Prefer distinctive identifiers or uncommon terms; multi-word queries are AND. Use \`OR\`/\`NOT\` for Boolean queries and quotes only when exact wording is known.
 - \`sessionId\` + \`aroundMessageId\`: scroll ±\`window\`; retain \`branchTip\` across forks.
 - \`sessionId\` alone: read; no args: browse recent sessions.
@@ -443,14 +446,16 @@ export default function (pi: ExtensionAPI): void {
 					{ cwd: ctx.cwd, signal },
 					params.scope === "repository" ? "required" : "optional",
 				);
+				// Repository scope uses the Git root. Outside Git it uses the real path of cwd.
+				const root = params.scope === "repository" ? inventory.gitRoot ?? realpathSync(ctx.cwd) : undefined;
 				const sync = syncSessions(sessionsDir(), dbPath());
 				const currentSessionPath = ctx.sessionManager.getSessionFile() ?? undefined;
 				const rows = getPreparationRows(dbPath(), {
 					limit,
-					...(params.scope === "repository" ? { repositoryRoot: inventory.gitRoot! } : {}),
+					...(root === undefined ? {} : { repositoryRoot: root }),
 					currentSessionPath,
 				});
-				return textResult(buildPreparationResult(params.scope, limit, inventory.gitRoot, sync, rows, inventory));
+				return textResult(buildPreparationResult(params.scope, limit, inventory.gitRoot, root, sync, rows, inventory));
 			}
 
 			let sessionId = params.sessionId?.trim() || undefined;

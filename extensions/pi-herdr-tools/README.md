@@ -68,12 +68,13 @@ Run `/handoff-worktree Fix the flaky login test`. The agent collects missing fac
 
 The tool registers only with `HERDR_ENV=1`. It also requires `HERDR_PANE_ID` and local `main`. A handoff has no checked integration: the new agent works without supervision. Delegated subagents cannot use the tool.
 
-The tool selects the repository in one of two ways:
+The tool selects the repository in one of three ways:
 
 - Without `repo`, the current directory and the pane workspace must be in the same Git repository.
-- With `repo`, the tool uses that child repository of the Pi working directory. Use it when Pi runs in a parent directory that holds many repositories. The current workspace does not need a Git checkout.
+- Without `repo`, when the pane workspace has no Git checkout, the Pi working directory is the repository. This works only when the working directory is a Git top-level directory. The tool then uses `--cwd <repository>`.
+- With `repo`, the tool uses that repository below the Pi working directory. Use it when Pi runs in a parent directory that holds many repositories. Use `.` for the working directory itself. The current workspace does not need a Git checkout.
 
-The tool never selects a child repository automatically. All parameters must be non-empty strings:
+The tool never selects a child repository automatically. When `repo` is needed, the error names the `repo` parameter. It lists at most 20 repository paths that it found below the Pi working directory. All parameters must be non-empty strings:
 
 | Parameter | Requirement |
 | --- | --- |
@@ -81,7 +82,7 @@ The tool never selects a child repository automatically. All parameters must be 
 | `label` | Workspace label. |
 | `agentName` | Unique agent name matching `^[a-z][a-z0-9_-]{0,31}$`. |
 | `prompt` | Self-contained task prompt. |
-| `repo` | Optional. A Git top-level directory, relative to the Pi working directory. It must not contain `..` or resolve outside that directory. A subdirectory of a repository fails. |
+| `repo` | Optional. A Git top-level directory, relative to the Pi working directory. `.` names the working directory. It must not contain `..` or resolve outside that directory. A subdirectory of a repository fails. |
 
 After validation, the tool runs `herdr worktree create --workspace <parent> --branch <branch> --base main --label <label> --no-focus`. With `repo`, it uses `--cwd <repository>` instead of `--workspace <parent>`. Herdr then opens the primary workspace of the repository, or creates it, and does not close it later. It starts Pi without session arguments. It submits `herdr agent prompt <agentName> <prompt> --wait --until working --timeout 30000`, with the prompt as one argument, not a shell command or file. The result includes workspace ID, tab, pane, branch, checkout path, agent name, and `repo` when set.
 
@@ -198,6 +199,7 @@ Clones are separate session files in the Pi-selected session directory. Each con
 | Agent start requested | An ambiguous launch retains targets and session files. Inspect reported IDs. |
 | Clone focus failure | Pi already started. Focus its tab manually. |
 | Handoff validation failure | No worktree exists. Correct the reported requirement. |
+| Handoff Git failure, for example a timeout or an old Git version | No worktree exists. The error gives the exit code and the first part of the Git error text. Fix Git, then call the tool again. |
 | Handoff cancellation | Before creation, nothing remains. After creation, reported resources remain; later launch or delivery steps stop. |
 | Handoff start or prompt failure | Resources remain. Errors identify worktree, branch, workspace, tab, pane, and agent. No automatic cleanup occurs. |
 | `agent_blocked` or `agent_prompt_stalled` | Prompt delivery failed. Inspect the agent before retrying. |

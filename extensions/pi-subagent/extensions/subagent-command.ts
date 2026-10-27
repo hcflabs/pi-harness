@@ -75,6 +75,8 @@ export type { PruneItem };
 export interface PrunePlan {
 	root: string;
 	items: readonly PruneItem[];
+	/** Incomplete review evidence, such as discovery issues or repositories that could not be read. */
+	warnings?: readonly string[];
 }
 
 /** Mutation adapters MUST check current() synchronously alongside their live ownership
@@ -211,7 +213,7 @@ const glyph = (status: string) => TONES[statusTone(status)].glyph;
 const cleanupReport = ({ text, failed, skipped }: CleanupReport): Report => textReport(failed ? "error" : skipped ? "warning" : "success", text);
 
 const PRUNE_IGNORED_CONFIRM_CODE_POINTS = 4_000;
-const shortId = ({ branch }: PruneItem) => branch.replace(/^pi-subagent\/subagent-/, "").replace(/([0-9a-f]{8})[0-9a-f]{16}$/, "$1");
+const shortId = ({ branch, repo }: PruneItem) => `${repo ? `${repo}:` : ""}${branch.replace(/^pi-subagent\/subagent-/, "").replace(/([0-9a-f]{8})[0-9a-f]{16}$/, "$1")}`;
 const NOT_SHOWN = "they are not removed in this run; run /subagent prune again after this run.";
 
 /** Fit whole item lines within `max` code points; never cut silently, and report exactly which items were shown. */
@@ -237,8 +239,9 @@ function fitItems<T>(header: string, items: readonly T[], line: (item: T) => str
 
 /** Groups items by exact reason, prunable groups first, in lines of 10 IDs so a long list is cut at whole lines.
  * Only shown items may be removed. IDs are display-only; removal uses the reviewed items. */
-function pruneReview({ root, items }: PrunePlan): { report: Report; shown: PruneItem[] } {
-	if (!items.length) return { report: { tone: "info", title: `No pi-subagent worktrees or branches in ${root}.`, sections: [] }, shown: [] };
+function pruneReview({ root, items, warnings = [] }: PrunePlan): { report: Report; shown: PruneItem[] } {
+	const warningSection: Section[] = warnings.length ? [{ heading: `Warnings (${warnings.length})`, tone: "warning", rows: warnings.map((text) => ({ text })) }] : [];
+	if (!items.length) return { report: { tone: warnings.length ? "warning" : "info", title: `No pi-subagent worktrees or branches in ${root}.`, sections: warningSection }, shown: [] };
 	const groups = new Map<string, PruneItem[]>();
 	for (const item of [...items.filter((item) => item.prunable), ...items.filter((item) => !item.prunable)]) {
 		const title = item.prunable ? `Prunable: ${item.reason}` : `Blocked: ${item.path ? item.reason : `${item.reason}; no checkout`}`;
@@ -262,7 +265,7 @@ function pruneReview({ root, items }: PrunePlan): { report: Report; shown: Prune
 		ROLES_REPORT_CODE_POINTS, NOT_SHOWN, (row) => row.items.length);
 	const sections = [...new Set(reviewed.shown.map(({ section }) => section))]
 		.map((section) => ({ ...section, rows: reviewed.shown.filter((row) => row.section === section).map(({ row }) => row) }));
-	return { report: { ...head, sections: [...head.sections, ...sections, ...moreSection(reviewed.more)] }, shown: reviewed.shown.flatMap((row) => row.items) };
+	return { report: { ...head, sections: [...head.sections, ...warningSection, ...sections, ...moreSection(reviewed.more)] }, shown: reviewed.shown.flatMap((row) => row.items) };
 }
 
 function discardReview(plan: DiscardPlan): { report: Report; shown: DiscardPlan["items"] } {

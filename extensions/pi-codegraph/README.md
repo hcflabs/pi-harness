@@ -22,7 +22,7 @@ Put the `codegraph` executable on Pi's `PATH`. Keep Pi's built-in MCP support en
 
 Use `/diagnostics` to read recent prerequisite warnings and seed failures that require a new index.
 
-Start `pi` in a linked worktree. If the primary checkout has no index, the TUI asks for indexing consent once per repository. Accept to run `codegraph init --yes` there. Alternatively, run this command in the primary checkout yourself:
+Start `pi` at the top level of a linked worktree. If the primary checkout has no index, the TUI asks for indexing consent once per repository. Accept to run `codegraph init --yes` there. Alternatively, run this command in the primary checkout yourself:
 
 ```bash
 codegraph init --yes
@@ -34,7 +34,15 @@ codegraph init --yes
 | `pi-codegraph` | mcp server | Runs `codegraph serve --mcp --path <worktree-root>`. Its file watcher updates the index. Its tools are hidden. |
 | CodeGraph setup status | ui | Shows users `✓ CG` for indexed, `○ CG` for missing, or a dim spinner with elapsed setup time. Errors include recovery instructions. |
 
-`codegraph_explore` accepts `query`, optional `maxFiles` (default 12), and optional `projectPath` (default: Pi's working directory). It runs `codegraph explore --path <projectPath> --max-files <maxFiles> <query>` and returns unchanged output. A command error or runtime above 120 seconds fails the tool call and shows the end of the error output.
+`codegraph_explore` accepts `query`, optional `maxFiles` (default 12), and optional `projectPath` (default: Pi's working directory). It finds the Git top-level directory of `projectPath`. It runs `codegraph explore --path <top-level> --max-files <maxFiles> <query>` and returns unchanged output. A command error or runtime above 120 seconds fails the tool call and shows the end of the error output.
+
+The tool fails before it runs CodeGraph in these cases:
+
+- `projectPath` is not an existing directory.
+- The directory is not in a Git repository.
+- The Git top-level directory has no `.codegraph/codegraph.db` file. This includes a plain directory inside an unrelated outer repository, for example a dotfiles repository in your home directory.
+
+The error tells the agent to pass `projectPath` for an indexed repository. It lists up to 10 indexed repositories below Pi's working directory, found up to 3 directory levels deep. The search stops after 10 seconds or at its other limits, and the error then says that the list can be incomplete.
 
 Works with `codemode`, including `codemode.mode` set to `only`. Scripts call `tools.codegraph_explore({ query })` and receive a string.
 
@@ -44,13 +52,19 @@ Works with `codemode`, including `codemode.mode` set to `only`. Scripts call `to
 
 Setup starts with Pi, not when Git creates a worktree. In the TUI, setup runs in the background. RPC, print, and JSON modes do not ask for consent. RPC waits for setup before it can accept an answer.
 
-If you decline or press Escape, the extension writes `pi-codegraph-declined` in the Git common directory. Delete that file to permit another consent request. Automatic worktree setup requires a primary index. The extension does not initialize non-Git directories or offer to index bare repositories.
+If you decline or press Escape, the extension writes `pi-codegraph-declined` in the Git common directory. Delete that file to permit another consent request. Automatic worktree setup requires a primary index. The extension does not initialize non-Git directories or offer to index bare repositories. It never indexes the repositories below a parent directory.
+
+The extension asks for consent only when Pi starts at the top level of the worktree. If Pi starts in a subdirectory, the extension does not ask, because the directory can be a plain directory inside an unrelated outer repository. The extension still uses an existing index, and it still creates a worktree index from a primary index.
+
+A submodule is a repository with its own Git directory. Git lists that Git directory as the primary worktree, so the extension does not treat it as a primary checkout. It never asks to index it. Run `codegraph init --yes` in the submodule yourself. The extension then uses that index.
 
 The MCP file watcher updates each checkout's separate index, including uncommitted edits and changes in the primary checkout. Sessions share one CodeGraph daemon per checkout. It stops five minutes after the last session closes.
 
 ### Index status
 
 During setup, the footer shows a dim status such as `⠋ CG · indexing 8s`. It shows `waiting for index` while another session initializes the index. Only the TUI animates the spinner. Setup ends with the indexed or missing badge, without a success notice. Non-Git directories have no badge.
+
+When Pi starts in a directory that is not in a Git repository, the TUI shows one short notice for the run. The notice tells you to pass `projectPath` to `codegraph_explore`.
 
 Missing prerequisites and setup failures remain visible as `! CG: prerequisites missing` or `! CG: setup failed`. Each has a theme-colored `!` icon and a notice with recovery instructions. With `pi-footer`, status stays on the third line. Direct `codegraph_explore` calls temporarily show `● CG`.
 

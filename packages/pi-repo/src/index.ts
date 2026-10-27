@@ -1,4 +1,4 @@
-import { lstat, readdir, realpath } from "node:fs/promises";
+import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 import { spawnBounded, type Exec } from "@hcflabs/pi-process";
 
@@ -10,6 +10,7 @@ const LIMIT_CAP = 1_000;
 const DEFAULT_MAX_DIRECTORIES = 5_000;
 const DEFAULT_BUDGET_MS = 30_000;
 const DETAIL_LIMIT = 500;
+const GIT_FILE_READ_BYTES = 4_096;
 const EXCLUDED_NAMES = new Set([".git", ".worktrees", "node_modules", ".terraform", "venv", ".venv"]);
 const EXCLUDED_PREFIXES = [".scratch-"];
 
@@ -37,8 +38,10 @@ export interface RepoTarget {
 export interface DiscoveredRepo {
 	repo: string;
 	root: string;
-	/** True when `.git` is a file, as in a linked worktree. */
+	/** True when `.git` is a file that points into `worktrees/` of another Git directory. */
 	linkedWorktree: boolean;
+	/** True when `.git` is a file that points into `modules/` of another Git directory. */
+	submodule: boolean;
 }
 
 /** A directory that discovery could not examine or verify. */
@@ -69,7 +72,12 @@ export interface RepoDiscovery {
 	base: string;
 	repos: DiscoveredRepo[];
 	issues: DiscoveryIssue[];
-	/** True when a limit stopped the search before it examined all directories. */
+	/**
+	 * True when a limit stopped the search before it examined all directories.
+	 * The limits are `maxDepth`, `maxDirectories`, `limit`, and `budgetMs`.
+	 * A directory at `maxDepth` that has child directories sets it, because discovery does not open those children.
+	 * A directory at `maxDepth` inside a found repository does not set it.
+	 */
 	truncated: boolean;
 }
 
@@ -243,9 +251,30 @@ function reason(error: unknown): string {
 	return (error instanceof Error ? error.message : String(error)).slice(0, DETAIL_LIMIT);
 }
 
+/** Classify a `.git` file by the Git directory that it names: `worktrees/` is a linked worktree and `modules/` is a submodule. */
+async function gitFileKind(gitFile: string): Promise<Pick<DiscoveredRepo, "linkedWorktree" | "submodule">> {
+	let text = "";
+	try {
+		const handle = await open(gitFile, "r");
+		try {
+			const { buffer, bytesRead } = await handle.read(Buffer.alloc(GIT_FILE_READ_BYTES), 0, GIT_FILE_READ_BYTES, 0);
+			text = buffer.toString("utf8", 0, bytesRead);
+		} finally {
+			await handle.close();
+		}
+	} catch {
+		// Git already accepted this repository. An unreadable pointer only means that its kind is unknown.
+	}
+	const gitDir = /^gitdir:[ \t]*([^\r\n]+)/.exec(text)?.[1]?.trim().replaceAll("\\", "/") ?? "";
+	// A worktree of a submodule names both directories. The `worktrees/` entry is the last one, so it wins.
+	if (/(?:^|\/)worktrees\/[^/]+\/?$/.test(gitDir)) return { linkedWorktree: true, submodule: false };
+	return { linkedWorktree: false, submodule: /(?:^|\/)modules\//.test(gitDir) };
+}
+
 /**
  * Find Git top-level directories below `base`.
- * The search does not follow symlinks and does not descend into a repository it found.
+ * The search does not follow symlinks. It also searches inside a repository that it found, for example for submodules.
+ * A repository inside a repository counts toward `limit` and obeys `maxDepth` and `exclude`.
  * It changes no files and no Git state.
  */
 export async function discoverRepos(base: string, options: DiscoveryOptions = {}): Promise<RepoDiscovery> {
@@ -264,9 +293,12 @@ export async function discoverRepos(base: string, options: DiscoveryOptions = {}
 
 	const repos: DiscoveredRepo[] = [];
 	const issues: DiscoveryIssue[] = [];
-	const queue: Array<{ path: string; depth: number }> = [{ path: start, depth: 0 }];
+	// `inRepo` is true below a found repository. Its deep directories are normal repository content.
+	const queue: Array<{ path: string; depth: number; inRepo: boolean }> = [{ path: start, depth: 0, inRepo: false }];
 	let examined = 0;
 	let truncated = false;
+	// A directory at `maxDepth` that has child directories. Discovery does not open those children.
+	let depthLimited = false;
 
 	while (queue.length > 0) {
 		options.signal?.throwIfAborted();
@@ -274,7 +306,7 @@ export async function discoverRepos(base: string, options: DiscoveryOptions = {}
 			truncated = true;
 			break;
 		}
-		const { path, depth } = queue.shift()!;
+		const { path, depth, inRepo } = queue.shift()!;
 		examined += 1;
 		const name = selector(canonicalBase, path);
 
@@ -296,8 +328,12 @@ export async function discoverRepos(base: string, options: DiscoveryOptions = {}
 			try {
 				const timeoutMs = Math.min(options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS, remaining);
 				const root = await gitTopLevel(path, { ...options, timeoutMs });
-				if (root === path) repos.push({ repo: name, root, linkedWorktree: marker.isFile() });
-				else issues.push({ path: name, reason: `has a .git entry, but Git reports ${root ?? "no repository"}` });
+				if (root !== path) {
+					issues.push({ path: name, reason: `has a .git entry, but Git reports ${root ?? "no repository"}` });
+				} else {
+					const kind = marker.isFile() ? await gitFileKind(join(path, ".git")) : { linkedWorktree: false, submodule: false };
+					repos.push({ repo: name, root, ...kind });
+				}
 			} catch (error) {
 				options.signal?.throwIfAborted();
 				if (now() >= deadline) {
@@ -306,9 +342,12 @@ export async function discoverRepos(base: string, options: DiscoveryOptions = {}
 				}
 				issues.push({ path: name, reason: reason(error) });
 			}
-			continue;
 		}
-		if (depth >= maxDepth) continue;
+		// A repository can hold more repositories. Read its directories like those of any other directory.
+		const atLimit = depth >= maxDepth;
+		// Inside a repository, a directory at the limit does not set `truncated`, so it is not read.
+		const below = inRepo || marker !== undefined;
+		if (atLimit && (depthLimited || below)) continue;
 
 		let entries;
 		try {
@@ -317,14 +356,18 @@ export async function discoverRepos(base: string, options: DiscoveryOptions = {}
 			issues.push({ path: name, reason: reason(error) });
 			continue;
 		}
-		entries
+		const children = entries
 			.filter((entry) => entry.isDirectory() && !excluded(entry.name, extra))
 			.map((entry) => entry.name)
-			.sort(compare)
-			.forEach((child) => queue.push({ path: join(path, child), depth: depth + 1 }));
+			.sort(compare);
+		if (atLimit) {
+			if (children.length > 0) depthLimited = true;
+			continue;
+		}
+		children.forEach((child) => queue.push({ path: join(path, child), depth: depth + 1, inRepo: below }));
 	}
 
 	repos.sort((left, right) => compare(left.repo, right.repo));
 	issues.sort((left, right) => compare(left.path, right.path));
-	return { base: canonicalBase, repos, issues, truncated };
+	return { base: canonicalBase, repos, issues, truncated: truncated || depthLimited };
 }

@@ -9,5 +9,5 @@ If the issue is empty, stop and ask the user to run `/handoff-worktree <issue>`.
 
 1. Gather only the missing facts from the conversation and the repository. Ask one focused question only if the repository, expected outcome, or a critical constraint is unclear.
 2. Write one self-contained prompt: problem, evidence, expected outcome, constraints, starting files, validation, and requested delivery. Exclude unrelated context, secrets, and stale runtime IDs.
-3. Choose a concise branch, a short label, and a unique agent name. If the Pi working directory holds several repositories, also choose `repo`: the path of the child repository, relative to the working directory.
+3. Choose a concise branch, a short label, and a unique agent name. If the Pi working directory is not a Git repository, or holds several repositories, also choose `repo`: the path of the child repository, relative to the working directory. If `herdr_handoff` reports that `repo` is required, choose from the repositories that it lists.
 4. Call `herdr_handoff` with them. Report its result. Do not wait for the new agent to finish.

@@ -57,7 +57,11 @@ Start pattern mining with:
 }
 ```
 
-Repository scope selects exact and descendant `cwd` values before applying the limit. It excludes the current session file. Use `scope:"all"` across repositories, including when inventory is unavailable.
+Repository scope selects sessions whose stored `cwd` is the scope root or below it, before it applies the limit. It excludes the current session file. The tool compares the real paths of both, so a symlink does not hide a session.
+
+Inside a Git repository, the scope root is the Git root. Outside Git, for example in a parent directory that holds many repositories, the scope root is the real path of the current directory. The result then has `scope.gitRoot:null` and `inventory.available:false` with `reason:"not-a-git-repository"`. `scope.root` always names the directory that the tool used. It is `null` for `scope:"all"`.
+
+Use `scope:"all"` to sample sessions from every directory.
 
 The TUI shows the last five visual lines and earlier-line count. Press the tool expand key (`Ctrl+O` by default) for the full bounded response; the model always receives it.
 
@@ -135,7 +139,7 @@ Files over 32 MiB are neither indexed nor retrieved. Discovery cannot find new o
 
 Preparation runs one sync pass. Backlog or incomplete walks limit the sample and set `sync.complete:false`. Total sync failure is a tool error. Preparation rejects `query`, session cursors, or `window`; `scope` requires the preparation operation.
 
-Repository scope fails outside Git or when inventory fails. All scope returns its corpus with `inventory.available:false` for nonzero Git-root lookup (`reason:"not-a-git-repository"`) or later inventory failure (`reason:"inventory-failed"`).
+Both scopes return their corpus with `inventory.available:false` when the current directory is not in a Git repository (`reason:"not-a-git-repository"`). Repository scope fails when inventory fails inside a Git repository. All scope returns its corpus with `inventory.available:false` and `reason:"inventory-failed"` in that case.
 
 | Limit | Maximum |
 | --- | --- |

@@ -1,4 +1,4 @@
-import { lstat } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { basename, relative, sep } from "node:path";
 import type { JsonValue } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -905,13 +905,27 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 	};
 	/** Report lines for discovery issues and truncation, because an incomplete search cannot prove absence. */
 	const discoveryWarnings = (found: RepoDiscovery): string[] => [
-		...(found.truncated ? [`Repository discovery below ${found.base} stopped at a limit; some repositories were not examined.`] : []),
+		...(found.truncated ? [`Repository discovery below ${found.base} stopped at a limit (depth, directory count, repository count, or time); some repositories were not examined.`] : []),
 		...found.issues.slice(0, 20).map(({ path, reason }) => `Repository discovery could not examine ${path}: ${boundedPublicText(reason)}`),
 		...(found.issues.length > 20 ? [`${found.issues.length - 20} more repository discovery issues omitted.`] : []),
 	];
-	/** Read-only inventory across the Repository targets below a parent directory that is not a Git repository. */
-	const childInventory = async (cwd: string, current: () => boolean = () => true): Promise<IsolatedInventory> => {
-		const found = await discoverRepos(cwd);
+	/**
+	 * Repository targets below `cwd`, when `cwd` is a plain directory inside an outer repository.
+	 * At the top level of a repository, discovery does not run. A failure becomes a warning and does not stop the outer repository.
+	 */
+	const nestedDiscovery = async (cwd: string): Promise<{ found?: RepoDiscovery; warnings: string[] }> => {
+		try {
+			const top = await gitTopLevel(cwd);
+			if (top === undefined || top === await realpath(cwd)) return { warnings: [] };
+			return { found: await discoverRepos(cwd), warnings: [] };
+		} catch (error) {
+			// A missing directory has nothing to discover.
+			if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as NodeJS.ErrnoException).code === "ENOTDIR") return { warnings: [] };
+			return { warnings: [`Repository discovery below ${cwd} failed: ${boundedPublicText(error instanceof Error ? error.message : String(error))}`] };
+		}
+	};
+	/** Read-only inventory of the discovered Repository targets. Each request names its repo and a live checkout. */
+	const childRequests = async (found: RepoDiscovery, current: () => boolean): Promise<{ requests: IsolatedRequest[]; invalidIds: string[]; warnings: string[] }> => {
 		const requests: IsolatedRequest[] = [];
 		const invalidIds: string[] = [];
 		const selectorOf = (root: string) => found.repos.find((item) => item.root === root)?.repo
@@ -940,8 +954,40 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 			requests.push({ ...request, repo: selectorOf(primary), leaseLive: false, checkout: primary });
 		}
 		invalidIds.push(...orphans.invalidIds);
+		return { requests, invalidIds, warnings };
+	};
+	/** Read-only inventory across the Repository targets below a parent directory that is not a Git repository. */
+	const childInventory = async (cwd: string, current: () => boolean = () => true): Promise<IsolatedInventory> => {
+		const found = await discoverRepos(cwd);
+		const { requests, invalidIds, warnings } = await childRequests(found, current);
 		return { root: found.base, leaseLive: requests.some((request) => request.leaseLive), requests,
 			invalidIds: [...new Set(invalidIds)], warnings };
+	};
+	/** Recovery lines for each discovered Repository target that has saved requests. */
+	const childRecoveryLines = async (found: RepoDiscovery): Promise<string[]> => {
+		const lines: string[] = [];
+		for (const { repo, root: child } of found.repos) {
+			const listed = await getComponents().runner.listRequests(child).catch(async (error: unknown) => {
+				if ((error as NodeJS.ErrnoException).code === "ENOENT" && await lstat(child).then(() => false, () => true)) return { requests: [], invalidIds: [] };
+				throw error;
+			});
+			if (!listed.requests.length && !listed.invalidIds.length) continue;
+			lines.push(`repo ${repo}:`, ...await recoveryLines(child));
+		}
+		return lines;
+	};
+	/** Review items of each discovered Repository target. One unreadable repository adds a warning and does not stop the others. */
+	const childPruneItems = async (found: RepoDiscovery): Promise<{ items: PruneItem[]; warnings: string[] }> => {
+		const items: PruneItem[] = [];
+		const warnings = discoveryWarnings(found);
+		for (const { repo, root: child } of found.repos) {
+			try {
+				for (const item of await inspectPruneCandidates(child, child, pruneGuards(child))) items.push({ ...item, repo });
+			} catch (failure) {
+				warnings.push(`Prune review could not read repo ${repo}: ${boundedPublicText(failure instanceof Error ? failure.message : String(failure))}`);
+			}
+		}
+		return { items, warnings };
 	};
 	return {
 		async inventory(cwd, current) {
@@ -967,7 +1013,28 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 			}
 			const orphans = await getComponents().runner.listOrphanRequests(root);
 			const leaseLive = await getComponents().runner.hasProductiveRunLease(root);
-			return { root, leaseLive, requests: [...requests, ...orphans.requests], invalidIds: [...new Set([...invalidIds, ...orphans.invalidIds])] };
+			const own = { root, leaseLive, requests: [...requests, ...orphans.requests], invalidIds: [...new Set([...invalidIds, ...orphans.invalidIds])] };
+			// In a plain directory inside an outer repository, also list the Repository targets below cwd.
+			const { found, warnings } = await nestedDiscovery(cwd);
+			if (!found && !warnings.length) return own;
+			let children: Awaited<ReturnType<typeof childRequests>> | undefined;
+			if (found) {
+				try {
+					children = await childRequests(found, current ?? (() => true));
+				} catch (error) {
+					if (current?.() === false) throw error;
+					warnings.push(`Isolated inventory could not read the repositories below ${found.base}: ${boundedPublicText(error instanceof Error ? error.message : String(error))}`);
+				}
+			}
+			return {
+				root,
+				leaseLive: leaseLive || (children?.requests.some((request) => request.leaseLive) ?? false),
+				// The inventory has several roots, so each request keeps the lease state of its own root.
+				requests: [...own.requests.map((request) => ({ ...request, leaseLive })), ...children?.requests ?? []],
+				invalidIds: [...new Set([...own.invalidIds, ...children?.invalidIds ?? []])],
+				// The child warnings already hold the discovery warnings. A failed child read keeps them here.
+				warnings: [...warnings, ...children?.warnings ?? (found ? discoveryWarnings(found) : [])],
+			};
 		},
 		async recover(cwd) {
 			let root: string;
@@ -977,15 +1044,7 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 				if (await gitTopLevel(cwd).then((top) => top !== undefined, () => true)) throw error;
 				// Outside a Git repository, recover each Repository target that has saved requests.
 				const found = await discoverRepos(cwd);
-				const lines: string[] = [];
-				for (const { repo, root: child } of found.repos) {
-					const listed = await getComponents().runner.listRequests(child).catch(async (error: unknown) => {
-						if ((error as NodeJS.ErrnoException).code === "ENOENT" && await lstat(child).then(() => false, () => true)) return { requests: [], invalidIds: [] };
-						throw error;
-					});
-					if (!listed.requests.length && !listed.invalidIds.length) continue;
-					lines.push(`repo ${repo}:`, ...await recoveryLines(child));
-				}
+				const lines = await childRecoveryLines(found);
 				const warnings = discoveryWarnings(found);
 				// An incomplete discovery is not proof that no request exists.
 				if (!lines.length) lines.push(warnings.length ? `No isolated requests in the ${found.repos.length} repositories that discovery examined below ${found.base}.`
@@ -993,7 +1052,18 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 				lines.push(...warnings);
 				return boundedReport(lines, "recovery report lines omitted; use subagent_status for exact request evidence.");
 			}
-			return boundedReport(await recoveryLines(root), "recovery report lines omitted; use subagent_status for exact request evidence.");
+			const lines = await recoveryLines(root);
+			// In a plain directory inside an outer repository, also recover the Repository targets below cwd.
+			const { found, warnings } = await nestedDiscovery(cwd);
+			if (found) {
+				try {
+					lines.push(...await childRecoveryLines(found));
+				} catch (error) {
+					warnings.push(`Recovery could not read the repositories below ${found.base}: ${boundedPublicText(error instanceof Error ? error.message : String(error))}`);
+				}
+				warnings.push(...discoveryWarnings(found));
+			}
+			return boundedReport([...lines, ...warnings], "recovery report lines omitted; use subagent_status for exact request evidence.");
 		},
 		async discardPlan(cwd, request) {
 			// A request listed from a parent directory runs Git in a live checkout of its own repository.
@@ -1019,23 +1089,57 @@ export function registerIsolatedExtension(pi: ExtensionAPI, options: RegisterIso
 			], "removal report lines omitted; reopen /subagent to inspect retained resources.") };
 		},
 		async prunePlan(cwd) {
-			const root = await lookupRoot(cwd);
-			return { root, items: await inspectPruneCandidates(root, cwd, pruneGuards(root)) };
+			let root: string;
+			try {
+				root = await lookupRoot(cwd);
+			} catch (error) {
+				// Outside a Git repository, review each Repository target below cwd. Any other failure stays a failure.
+				if (await gitTopLevel(cwd).then((top) => top !== undefined, () => true)) throw error;
+				const found = await discoverRepos(cwd);
+				return { root: found.base, ...await childPruneItems(found) };
+			}
+			const items = await inspectPruneCandidates(root, cwd, pruneGuards(root));
+			// In a plain directory inside an outer repository, also review the Repository targets below cwd.
+			const { found, warnings } = await nestedDiscovery(cwd);
+			if (!found) return warnings.length ? { root, items, warnings } : { root, items };
+			const children = await childPruneItems(found);
+			return { root, items: [...items, ...children.items], warnings: [...warnings, ...children.warnings] };
 		},
 		async prune(cwd, items, allowIgnored, force, current) {
 			requireCurrent(current);
-			const root = await lookupRoot(cwd);
-			const { removals, checkouts } = await removePruneCandidates(root, cwd, items, allowIgnored, force,
-				{ ...pruneGuards(root), current: () => current() && !sessionClosed });
-			const removed = removals.filter(({ outcome }) => outcome === "removed");
-			const reconciled = removed.length
-				? await getComponents().runner.reconcilePrunedAborts(checkouts, removed.map(({ item }) => basename(item.branch))) : [];
-			const count = (outcome: string) => removals.filter((item) => item.outcome === outcome).length;
-			return { failed: count("failed"), skipped: count("skipped"), text: boundedReport([
-				`Pi Subagent prune in ${root}: ${removed.length} removed, ${count("skipped")} skipped, ${count("failed")} failed.`,
-				...removals.map(({ outcome, item, reason }) => `${outcome}: ${item.path ?? "(no checkout)"} · ${item.branch} · ${reason}`),
-				...reconciled,
-			], "prune report lines omitted.") };
+			// Items reviewed in a parent directory carry their Repository target. Group them so each repository is checked again.
+			const groups = new Map<string | undefined, PruneItem[]>();
+			for (const item of items) groups.set(item.repo, [...groups.get(item.repo) ?? [], item]);
+			const lines: string[] = [];
+			let failed = 0;
+			let skipped = 0;
+			for (const [repo, group] of groups) {
+				requireCurrent(current);
+				let root: string;
+				try {
+					root = await lookupRoot(cwd, undefined, repo);
+				} catch (error) {
+					// One unreadable Repository target keeps its items and does not stop the other targets.
+					failed += group.length;
+					lines.push(`failed: repo ${repo}: ${group.length} item(s) kept: ${boundedPublicText(error instanceof Error ? error.message : String(error))}`);
+					continue;
+				}
+				const mainCwd = repo === undefined ? cwd : root;
+				const { removals, checkouts } = await removePruneCandidates(root, mainCwd, group, allowIgnored, force,
+					{ ...pruneGuards(root), current: () => current() && !sessionClosed });
+				const removed = removals.filter(({ outcome }) => outcome === "removed");
+				const reconciled = removed.length
+					? await getComponents().runner.reconcilePrunedAborts(checkouts, removed.map(({ item }) => basename(item.branch))) : [];
+				const count = (outcome: string) => removals.filter((item) => item.outcome === outcome).length;
+				failed += count("failed");
+				skipped += count("skipped");
+				lines.push(
+					`Pi Subagent prune in ${root}: ${removed.length} removed, ${count("skipped")} skipped, ${count("failed")} failed.`,
+					...removals.map(({ outcome, item, reason }) => `${outcome}: ${item.path ?? "(no checkout)"} · ${item.branch} · ${reason}`),
+					...reconciled,
+				);
+			}
+			return { failed, skipped, text: boundedReport(lines.length ? lines : ["Pi Subagent prune: nothing selected."], "prune report lines omitted.") };
 		},
 		async inspect(root, requestId) {
 			const response = await getComponents().runner.status(requestId, root);

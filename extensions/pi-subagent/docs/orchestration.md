@@ -444,7 +444,7 @@ The report lists removed, skipped, and failed resources. After complete cleanup,
 
 ### Prune leftover worktrees
 
-Run `/subagent prune` to clean up leftover worker and integration checkouts under `.worktrees/`. Their branches have the name `pi-subagent/subagent-<name>-<24hex>`, or the saved legacy name `pi-subagent/subagent-<24hex>`. The command also cleans up such branches that have no checkout. The review starts with the number of removable and blocked items. It groups the items by the exact reason that the command can remove them, or by their exact blockers, and shows each reason once. Under each reason, it shows the readable name, if present, and the first 8 characters of the identity suffix. The command can remove an item only when all of these conditions are true:
+Run `/subagent prune` to clean up leftover worker and integration checkouts under `.worktrees/`. Their branches have the name `pi-subagent/subagent-<name>-<24hex>`, or the saved legacy name `pi-subagent/subagent-<24hex>`. The command also cleans up such branches that have no checkout. The review starts with the number of removable and blocked items. It groups the items by the exact reason that the command can remove them, or by their exact blockers, and shows each reason once. Under each reason, it shows the readable name, if present, and the first 8 characters of the identity suffix. In a parent directory that is not a Git repository, the command reviews each Repository target below it. In a plain subdirectory of a Git repository, it reviews the outer repository and each Repository target below the subdirectory. Each item of a Repository target then starts with its `repo`, and Main HEAD is the HEAD of that repository. The review shows a warning when discovery did not examine all directories. The command can remove an item only when all of these conditions are true:
 
 - Its branch tip is already in Main's HEAD or in the local `origin` default-branch ref. The command does not fetch.
 - Its checkout has no tracked or untracked changes. No merge, rebase, cherry-pick, revert, or bisect is in progress.
@@ -537,7 +537,9 @@ Isolated Herdr Role launches receive the same turn, token, and child-runtime bud
 | `blame` | Required `path`, optional `revision` and paired `startLine`/`endLine` |
 | `rev-parse` | Optional `revision`; resolves one commit ID |
 
-Revisions accept commit IDs or named refs with optional `~N`/`^N` ancestry, not ranges or reflog expressions. Paths are literal and relative to the assigned cwd. The tool rejects absolute paths, traversal, `.git` components, and paths that look like options.
+Every operation accepts the optional `repo` parameter. Use it when the assigned cwd is a parent directory that is not a Git repository. `repo` is a child Git repository as a path relative to the assigned cwd, such as `team/service`. It follows the same rules as the `delegate_task` `repo` parameter: the path must stay inside cwd after symlink resolution and must be a Git top-level directory. If `repo` is omitted and cwd is not a Git repository, the call fails with a message that names `repo`. Main lists the targets with `subagent_repos`.
+
+Revisions accept commit IDs or named refs with optional `~N`/`^N` ancestry, not ranges or reflog expressions. Paths are literal. They are relative to the selected `repo`, or to the assigned cwd if `repo` is omitted. The tool rejects absolute paths, traversal, `.git` components, and paths that look like options.
 
 Use named candidate refs. Do not assume that Main's checkout contains an isolated candidate. In isolated judgment, the supplied exact patch stays authoritative. Git inspection supplies only referenced context, not a replacement diff. Reviewers still cannot run tests, write, commit, or push. They approve only with exact `PASS`.
 

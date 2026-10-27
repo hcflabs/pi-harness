@@ -157,7 +157,7 @@ test("resolveRepoTarget reports Git inspection failures as plain errors", async 
 	);
 });
 
-test("discoverRepos finds repositories to depth 3 without descending into them", async (t) => {
+test("discoverRepos finds repositories to depth 3 and nested repositories inside them", async (t) => {
 	const base = await scratch(t);
 	await repository(join(base, "one"));
 	await repository(join(base, "group", "two"));
@@ -166,12 +166,78 @@ test("discoverRepos finds repositories to depth 3 without descending into them",
 	await repository(join(base, "one", "inner"));
 	const result = await discoverRepos(base);
 	assert.equal(result.base, base);
-	assert.deepEqual(result.repos.map((repo) => repo.repo), ["group/team/three", "group/two", "one"]);
+	assert.deepEqual(result.repos.map((repo) => repo.repo), ["group/team/three", "group/two", "one", "one/inner"]);
 	assert.deepEqual(result.issues, []);
+	// `group/team/deeper` is at the depth limit and has the child directory `four`. Discovery did not examine it.
+	assert.equal(result.truncated, true);
+	const deeper = await discoverRepos(base, { maxDepth: 4 });
+	assert.deepEqual(deeper.repos.map((repo) => repo.repo), ["group/team/deeper/four", "group/team/three", "group/two", "one", "one/inner"]);
+	assert.equal(deeper.truncated, false);
+});
+
+test("discoverRepos reports truncation when a directory at the depth limit has child directories", async (t) => {
+	const base = await scratch(t);
+	await repository(join(base, "a", "b", "c", "d", "deep"));
+	const result = await discoverRepos(base);
+	assert.deepEqual(result.repos, []);
+	assert.equal(result.truncated, true);
+	assert.deepEqual((await discoverRepos(base, { maxDepth: 5 })).repos.map((repo) => repo.repo), ["a/b/c/d/deep"]);
+	assert.equal((await discoverRepos(base, { maxDepth: 5 })).truncated, false);
+	// Excluded directories and files at the depth limit are not unexamined directories.
+	const flat = await scratch(t);
+	await mkdir(join(flat, "a", "b", "c", "node_modules"), { recursive: true });
+	await mkdir(join(flat, "a", "b", "c", ".worktrees"));
+	await writeFile(join(flat, "a", "b", "c", "file"), "x");
+	const complete = await discoverRepos(flat);
+	assert.equal(complete.truncated, false);
+	assert.deepEqual(complete.issues, []);
+	await mkdir(join(flat, "a", "b", "c", "child"));
+	assert.equal((await discoverRepos(flat)).truncated, true);
+	assert.equal((await discoverRepos(flat, { exclude: ["child"] })).truncated, false);
+});
+
+test("discoverRepos does not report truncation for directories inside a repository at the depth limit", async (t) => {
+	const base = await scratch(t);
+	const repo = await repository(join(base, "a", "b", "c"));
+	await mkdir(join(repo, "src", "lib"), { recursive: true });
+	const result = await discoverRepos(base);
+	assert.deepEqual(result.repos.map((item) => item.repo), ["a/b/c"]);
+	// Ordinary repository content below the limit is not a missed repository.
 	assert.equal(result.truncated, false);
-	assert.deepEqual((await discoverRepos(base, { maxDepth: 4 })).repos.map((repo) => repo.repo), [
-		"group/team/deeper/four", "group/team/three", "group/two", "one",
+	// A plain directory outside every repository still reports the limit.
+	await mkdir(join(base, "a", "b", "plain", "child"), { recursive: true });
+	assert.equal((await discoverRepos(base)).truncated, true);
+});
+
+test("discoverRepos lists repositories inside repositories and respects the depth and exclude rules there", async (t) => {
+	const base = await scratch(t);
+	const outer = await repository(join(base, "outer"));
+	await repository(join(outer, "packages", "inner"));
+	await repository(join(outer, "node_modules", "pkg"));
+	await repository(join(outer, ".worktrees", "wt"));
+	await repository(join(outer, "vendor", "lib"));
+	await repository(join(outer, "a", "b", "c", "far"));
+	const result = await discoverRepos(base, { exclude: ["vendor"] });
+	assert.deepEqual(result.repos.map((repo) => repo.repo), ["outer", "outer/packages/inner"]);
+	// `outer/a/b/c/far` is below the depth limit inside a repository. That is a documented limit, not truncation.
+	assert.equal(result.truncated, false);
+	assert.deepEqual((await discoverRepos(base, { exclude: ["vendor"], maxDepth: 5 })).repos.map((repo) => repo.repo), [
+		"outer", "outer/a/b/c/far", "outer/packages/inner",
 	]);
+	// Repositories inside repositories count against the repository limit.
+	const limited = await discoverRepos(base, { limit: 1 });
+	assert.deepEqual(limited.repos.map((repo) => repo.repo), ["outer"]);
+	assert.equal(limited.truncated, true);
+});
+
+test("discoverRepos descends into a directory whose .git entry is not a repository", async (t) => {
+	const base = await scratch(t);
+	await mkdir(join(base, "broken"));
+	await writeFile(join(base, "broken", ".git"), "gitdir: /nonexistent\n");
+	const child = await repository(join(base, "broken", "child"));
+	const result = await discoverRepos(base);
+	assert.deepEqual(result.repos.map((repo) => repo.root), [child]);
+	assert.deepEqual(result.issues.map((issue) => issue.path), ["broken"]);
 });
 
 test("discoverRepos skips excluded names and symlinked directories", async (t) => {
@@ -182,7 +248,7 @@ test("discoverRepos skips excluded names and symlinked directories", async (t) =
 	await repository(join(base, "vendor", "pkg"));
 	await symlink(real, join(base, "alias"));
 	const result = await discoverRepos(base, { exclude: ["vendor"] });
-	assert.deepEqual(result.repos, [{ repo: "real", root: real, linkedWorktree: false }]);
+	assert.deepEqual(result.repos, [{ repo: "real", root: real, linkedWorktree: false, submodule: false }]);
 });
 
 test("discoverRepos marks linked worktrees and reports invalid .git entries", async (t) => {
@@ -192,17 +258,38 @@ test("discoverRepos marks linked worktrees and reports invalid .git entries", as
 	await mkdir(join(base, "fake"));
 	await writeFile(join(base, "fake", ".git"), "gitdir: /nonexistent\n");
 	const result = await discoverRepos(base);
-	assert.deepEqual(result.repos.map(({ repo, linkedWorktree }) => ({ repo, linkedWorktree })), [
-		{ repo: "linked", linkedWorktree: true },
-		{ repo: "main", linkedWorktree: false },
+	assert.deepEqual(result.repos.map(({ repo, linkedWorktree, submodule }) => ({ repo, linkedWorktree, submodule })), [
+		{ repo: "linked", linkedWorktree: true, submodule: false },
+		{ repo: "main", linkedWorktree: false, submodule: false },
 	]);
 	assert.deepEqual(result.issues.map((issue) => issue.path), ["fake"]);
 });
 
-test("discoverRepos returns the base itself when it is a repository", async (t) => {
+test("discoverRepos tells a submodule from a linked worktree and from a separate Git directory", async (t) => {
+	const base = await scratch(t);
+	const library = await repository(join(await scratch(t), "library"));
+	const main = await repository(join(base, "main"));
+	git(main, "-c", "protocol.file.allow=always", "-c", "user.name=t", "-c", "user.email=t@example.com", "submodule", "add", "-q", library, "vendor/lib");
+	git(main, "worktree", "add", "-q", "-b", "feature", join(base, "linked"));
+	await mkdir(join(base, "separate"));
+	git(base, "init", "-q", `--separate-git-dir=${join(await scratch(t), "gitdir")}`, join(base, "separate"));
+	const result = await discoverRepos(base);
+	assert.deepEqual(result.repos.map(({ repo, linkedWorktree, submodule }) => ({ repo, linkedWorktree, submodule })), [
+		{ repo: "linked", linkedWorktree: true, submodule: false },
+		{ repo: "main", linkedWorktree: false, submodule: false },
+		{ repo: "main/vendor/lib", linkedWorktree: false, submodule: true },
+		{ repo: "separate", linkedWorktree: false, submodule: false },
+	]);
+	assert.deepEqual(result.issues, []);
+});
+
+test("discoverRepos returns the base itself and the repositories inside it", async (t) => {
 	const root = await repository(join(await scratch(t), "repo"));
-	await repository(join(root, "nested"));
-	assert.deepEqual((await discoverRepos(root)).repos, [{ repo: ".", root, linkedWorktree: false }]);
+	const nested = await repository(join(root, "nested"));
+	assert.deepEqual((await discoverRepos(root)).repos, [
+		{ repo: ".", root, linkedWorktree: false, submodule: false },
+		{ repo: "nested", root: nested, linkedWorktree: false, submodule: false },
+	]);
 });
 
 test("discoverRepos searches a selected path and reports truncation", async (t) => {

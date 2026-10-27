@@ -4,6 +4,7 @@ import { link, mkdir, readFile, rename, rm, writeFile, chmod } from "node:fs/pro
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { discoverRepos, gitTopLevel, resolveRepoTarget } from "@hcflabs/pi-repo";
 
 const hookSourcePath = fileURLToPath(new URL("../hooks/post-checkout.mjs", import.meta.url));
 const managedHookMarker = "pi-deps-managed-hook";
@@ -87,17 +88,25 @@ interface InstallStatus {
 	message?: string;
 }
 
+// The absolute Git directory of `cwd`, or undefined when Git cannot find one.
+async function gitDirectory(pi: ExtensionAPI, cwd: string): Promise<string | undefined> {
+	const git = await pi.exec("git", ["rev-parse", "--path-format=absolute", "--git-dir"], { cwd });
+	return git.code !== 0 || git.killed ? undefined : git.stdout.trim();
+}
+
 // Watches the status file written by the background installer spawned by the post-checkout hook.
+// It reads the Git directory of `cwd`. A session in a parent directory has none, so it watches nothing.
 // First consumer wins: the status file is removed once reported.
 async function watchDependencyInstallation(
 	pi: ExtensionAPI,
 	ctx: ExtensionContext,
+	cwd: string,
 	signal: AbortSignal,
 ): Promise<void> {
 	if (ctx.mode !== "tui") return;
-	const git = await pi.exec("git", ["rev-parse", "--path-format=absolute", "--git-dir"], { cwd: ctx.cwd });
-	if (git.code !== 0 || git.killed) return;
-	const stateDir = join(git.stdout.trim(), "pi-deps");
+	const gitDir = await gitDirectory(pi, cwd);
+	if (gitDir === undefined) return;
+	const stateDir = join(gitDir, "pi-deps");
 	const statusPath = join(stateDir, "status.json");
 	let parseFailures = 0;
 	// The "unreadable" state is local to the watcher. Its message holds the error code.
@@ -163,38 +172,77 @@ async function watchDependencyInstallation(
 	}
 }
 
+// The repo list in the error message is bounded in count, in directories, and in time.
+const maxListedRepos = 10;
+const listSearch = { limit: maxListedRepos + 1, maxDirectories: 2_000, budgetMs: 5_000 };
+
+// True only when `cwd` is not in a Git repository. Any other Git failure keeps its own message.
+async function outsideGitRepository(cwd: string): Promise<boolean> {
+	try {
+		return (await gitTopLevel(cwd)) === undefined;
+	} catch {
+		return false;
+	}
+}
+
+async function missingRepoError(cwd: string): Promise<Error> {
+	const lead = `/deps needs a repo argument, because ${cwd} is not a Git repository. Run /deps <repo>.`;
+	try {
+		const found = await discoverRepos(cwd, listSearch);
+		if (found.repos.length === 0) return new Error(`${lead} No repo found below it within the search limits.`);
+		const more = found.repos.length > maxListedRepos || found.truncated;
+		const names = found.repos.slice(0, maxListedRepos).map(({ repo }) => repo).join(", ");
+		return new Error(`${lead} Repos found: ${names}${more ? ". More repos may exist. Name a repo by its path." : "."}`);
+	} catch (error) {
+		return new Error(`${lead} The repo search failed: ${errorMessage(error)}`, { cause: error });
+	}
+}
+
 export default function depsExtension(pi: ExtensionAPI): void {
 	let watcher: AbortController | undefined;
-	pi.on("session_shutdown", () => watcher?.abort());
-	pi.on("session_start", (_event, ctx) => {
+	const startWatcher = (ctx: ExtensionContext, cwd: string) => {
 		watcher?.abort();
 		const controller = watcher = new AbortController();
-		void watchDependencyInstallation(pi, ctx, controller.signal).catch((error) => {
+		void watchDependencyInstallation(pi, ctx, cwd, controller.signal).catch((error) => {
 			if (!controller.signal.aborted) ctx.ui.notify(`pi-deps: ${errorMessage(error)}`, "error");
 		});
-	});
+	};
+	pi.on("session_shutdown", () => watcher?.abort());
+	pi.on("session_start", (_event, ctx) => startWatcher(ctx, ctx.cwd));
 	pi.registerCommand("deps", {
-		description: "Toggle dependency preparation for future Git worktrees",
+		description: "Toggle dependency preparation for future Git worktrees. In a parent directory, name the repo: /deps <repo>",
 		handler: async (args, ctx) => {
-			if (args.trim()) throw new Error("Usage: /deps");
-			const result = await pi.exec("git", ["rev-parse", "--git-common-dir", "--git-path", "hooks"], { cwd: ctx.cwd });
+			const selector = args.trim();
+			let cwd = ctx.cwd;
+			if (selector) {
+				// A selector is relative to the session directory and must name a Git top-level directory.
+				try {
+					cwd = (await resolveRepoTarget(ctx.cwd, selector)).root;
+				} catch (error) {
+					throw new Error(`Cannot select repo ${selector}: ${errorMessage(error)}`, { cause: error });
+				}
+			}
+			const result = await pi.exec("git", ["rev-parse", "--git-common-dir", "--git-path", "hooks"], { cwd });
 			if (result.code !== 0 || result.killed) {
+				if (!selector && await outsideGitRepository(ctx.cwd)) throw await missingRepoError(ctx.cwd);
 				throw new Error(`Cannot locate shared Git directory: ${result.stderr.trim() || `exit code ${result.code}`}`);
 			}
 			const [commonGitDir, hooksDir] = result.stdout.trim().split(/\r?\n/);
 
 			// core.hooksPath replaces <commonGitDir>/hooks; refuse instead of writing where Git ignores or shares the hook.
-			const defaultHooksDir = resolve(ctx.cwd, commonGitDir, "hooks");
-			if (resolve(ctx.cwd, hooksDir) !== defaultHooksDir) {
+			const defaultHooksDir = resolve(cwd, commonGitDir, "hooks");
+			if (resolve(cwd, hooksDir) !== defaultHooksDir) {
 				throw new Error(`Refusing non-default hooks directory (core.hooksPath?): ${hooksDir}; expected ${defaultHooksDir}`);
 			}
 
 			try {
-				const toggled = await toggleDependencyHook(resolve(ctx.cwd, commonGitDir));
+				const toggled = await toggleDependencyHook(resolve(cwd, commonGitDir));
 				ctx.ui.notify(
 					`Dependency preparation ${toggled.enabled ? "enabled" : "disabled"}: ${toggled.path}`,
 					"info",
 				);
+				// A session in a parent directory has no Git directory to watch. It watches the repo that /deps enabled.
+				if (toggled.enabled && selector && await gitDirectory(pi, ctx.cwd) === undefined) startWatcher(ctx, cwd);
 			} catch (error) {
 				throw new Error(`Cannot toggle dependency preparation: ${errorMessage(error)}`, { cause: error });
 			}

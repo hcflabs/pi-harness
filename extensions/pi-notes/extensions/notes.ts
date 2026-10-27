@@ -7,6 +7,7 @@ import {
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { extensionConfigDir, writePrivateTextFileAtomically } from "@hcflabs/pi-config-store";
+import { gitTopLevel } from "@hcflabs/pi-repo";
 import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
 const MAX_NOTES = 4;
@@ -81,13 +82,23 @@ function setNotesWidget(ctx: ExtensionContext, notes: string[]): void {
 	}));
 }
 
-async function resolveWorktree(pi: ExtensionAPI, cwd: string): Promise<WorktreeIdentity> {
+/**
+ * Read the identity of the Git worktree that contains `cwd`.
+ * Return `undefined` when `cwd` is outside a Git repository.
+ * Other Git failures throw, for example a timeout, a missing Git program, or a bare repository.
+ */
+async function gitWorktree(pi: ExtensionAPI, cwd: string): Promise<WorktreeIdentity | undefined> {
 	const result = await pi.exec(
 		"git",
 		["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--git-dir"],
 		{ cwd },
 	);
-	if (result.code !== 0 || result.killed) throw new Error("pi-notes requires a Git worktree");
+	if (result.killed) throw new Error(`git did not finish in ${cwd}`);
+	if (result.code !== 0) {
+		// gitTopLevel decides without Git messages, so the answer does not depend on the Git locale.
+		if (await gitTopLevel(cwd) === undefined) return undefined;
+		throw new Error(`git rev-parse failed in ${cwd} with exit ${result.code}`);
+	}
 	const [worktree, repository, gitDir, ...extra] = result.stdout.trim().split(/\r?\n/);
 	if (!worktree || !repository || !gitDir || extra.length) throw new Error("git returned an invalid worktree identity");
 	const [canonicalWorktree, canonicalRepository, canonicalGitDir] = await Promise.all([
@@ -101,6 +112,18 @@ async function resolveWorktree(pi: ExtensionAPI, cwd: string): Promise<WorktreeI
 		gitDir: canonicalGitDir,
 		generation: await worktreeGeneration(canonicalGitDir),
 	};
+}
+
+/** Outside a Git repository, the real path of the directory names the notes. The three paths are equal. */
+async function directoryIdentity(cwd: string): Promise<WorktreeIdentity> {
+	const directory = await realpath(cwd);
+	return { worktree: directory, repository: directory, gitDir: directory, generation: await worktreeGeneration(directory) };
+}
+
+const isDirectoryIdentity = ({ worktree, repository, gitDir }: WorktreeIdentity) => worktree === repository && repository === gitDir;
+
+async function resolveWorktree(pi: ExtensionAPI, cwd: string): Promise<WorktreeIdentity> {
+	return await gitWorktree(pi, cwd) ?? await directoryIdentity(cwd);
 }
 
 async function loadNotes(identity: WorktreeIdentity): Promise<{ notes: string[]; message?: string }> {
@@ -186,13 +209,15 @@ async function pruneStale(pi: ExtensionAPI): Promise<void> {
 			if (code === "ENOENT" || code === "ENOTDIR") stale = true;
 			else continue;
 		}
-		if (!stale) {
-			let current: WorktreeIdentity;
+		// A directory record has no Git identity to compare. If the directory becomes a repository, /note-clear resets it.
+		if (!stale && !isDirectoryIdentity(record)) {
+			let current: WorktreeIdentity | undefined;
 			try {
-				current = await resolveWorktree(pi, record.worktree);
+				current = await gitWorktree(pi, record.worktree);
 			} catch {
 				continue;
 			}
+			if (!current) continue;
 			const { notes, ...identity } = record;
 			stale = !isDeepStrictEqual(current, identity);
 		}
@@ -215,7 +240,7 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("note", {
-		description: `Add a note to this Git worktree (max ${MAX_NOTES})`,
+		description: `Add a note to this Git worktree or directory (max ${MAX_NOTES})`,
 		handler: async (args, ctx) => {
 			const text = args.replace(/\s+/g, " ").trim();
 			if (!text) {
@@ -240,7 +265,7 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("note-rm", {
-		description: "Remove a note from this Git worktree",
+		description: "Remove a note from this Git worktree or directory",
 		handler: async (args, ctx) => {
 			if (args.trim()) {
 				ctx.ui.notify("Usage: /note-rm", "warning");
@@ -270,7 +295,7 @@ export default function notesExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("note-clear", {
-		description: "Clear notes for this Git worktree",
+		description: "Clear notes for this Git worktree or directory",
 		handler: async (args, ctx) => {
 			if (args.trim()) {
 				ctx.ui.notify("Usage: /note-clear", "warning");

@@ -26,7 +26,7 @@ The grouping of a session with its directly recorded fork or clone parent, used 
 A bounded sample of recent lineage-distinct sessions for pattern analysis. It includes user and assistant text, not thinking or tool-result content.
 
 **Repository scope**:
-The selection of sessions whose recorded working directories are the current Git root or its descendants.
+The selection of sessions whose recorded working directories are the scope root or its descendants. The scope root is the current Git root. Outside Git, it is the current working directory.
 
 **Repository inventory**:
 Discovery hints about indexed package scripts, executables, instructions, and effective repository Skills. It is not proof of current worktree contents or workflow ownership.

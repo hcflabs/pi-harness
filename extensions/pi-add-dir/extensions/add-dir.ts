@@ -123,19 +123,24 @@ function parseAddArgs(args: string): ParsedAddArgs | undefined {
 	return { source: "session", path: input };
 }
 
-function hasGitMarker(cwd: string): boolean {
-	let directory = resolveDir(cwd, cwd);
+// Returns the nearest directory at or above `start` that holds a `.git` entry.
+function findGitRoot(start: string): string | undefined {
+	let directory = resolveDir(start, start);
 	while (true) {
 		try {
 			lstatSync(join(directory, ".git"));
-			return true;
+			return directory;
 		} catch (error) {
 			if (!isMissingPathError(error)) throw error;
 		}
 		const parent = dirname(directory);
-		if (parent === directory) return false;
+		if (parent === directory) return undefined;
 		directory = parent;
 	}
+}
+
+function hasGitMarker(cwd: string): boolean {
+	return findGitRoot(cwd) !== undefined;
 }
 
 function isWithinDir(dir: string, candidate: string): boolean {
@@ -145,6 +150,21 @@ function isWithinDir(dir: string, candidate: string): boolean {
 
 function overlaps(a: string, b: string): boolean {
 	return isWithinDir(a, b) || isWithinDir(b, a);
+}
+
+// Pi loads context files from the working directory and its ancestors, never from children.
+// So Pi already loads the working directory and its ancestors. Refuse them.
+// A child is a separate scope when the working directory is not in a Git repository
+// or the child sits in a different Git repository. If a file check fails, refuse the child.
+function overlapsCwdScope(cwdPath: string, candidate: string): boolean {
+	if (isWithinDir(candidate, cwdPath)) return true;
+	if (!isWithinDir(cwdPath, candidate)) return false;
+	try {
+		const cwdRoot = findGitRoot(cwdPath);
+		return cwdRoot !== undefined && findGitRoot(candidate) === cwdRoot;
+	} catch {
+		return true;
+	}
 }
 
 function contextSummary(dirCtx: DirContext): string {
@@ -303,7 +323,7 @@ export default function addDirExtension(pi: ExtensionAPI, options: ExtensionOpti
 				}
 				const duplicate = nextActive.find((dir) => dir.absolutePath === absolutePath);
 				if (!inactiveReason && duplicate) inactiveReason = `shadowed by ${duplicate.source} scope`;
-				if (!inactiveReason && overlaps(cwdPath, absolutePath)) {
+				if (!inactiveReason && overlapsCwdScope(cwdPath, absolutePath)) {
 					inactiveReason = "overlaps current working directory scope";
 				}
 				const overlap = !inactiveReason
@@ -350,7 +370,11 @@ export default function addDirExtension(pi: ExtensionAPI, options: ExtensionOpti
 			if (hasGitMarker(cwd)) {
 				throw new Error(`Cannot inspect Git repository: ${probe.stderr.trim() || `git exited ${probe.code}`}`);
 			}
-			if (required) throw new Error("Project-persistent directories require a Git repository.");
+			if (required) {
+				throw new Error(
+					"Project-persistent directories require a Git repository. Use --global to save the directory for every workspace.",
+				);
+			}
 			return [];
 		}
 		const result = await pi.exec("git", ["config", "--local", "-z", "--get-all", PROJECT_CONFIG_KEY], { cwd });
@@ -430,7 +454,7 @@ export default function addDirExtension(pi: ExtensionAPI, options: ExtensionOpti
 				resourcesChanged: false,
 			};
 		}
-		if (overlaps(resolveDir(ctx.cwd, ctx.cwd), absolutePath)) {
+		if (overlapsCwdScope(resolveDir(ctx.cwd, ctx.cwd), absolutePath)) {
 			return { ok: false, message: "Directory overlaps current working directory scope.", resourcesChanged: false };
 		}
 		const overlap = addedDirs.find(

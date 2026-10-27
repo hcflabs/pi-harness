@@ -14,7 +14,7 @@ npm install @hcflabs/pi-repo
 import { discoverRepos, resolveRepoTarget } from "@hcflabs/pi-repo";
 
 const found = await discoverRepos("/home/me/code/group");
-// found.repos: [{ repo: "ci/components", root: "/home/me/code/group/ci/components", linkedWorktree: false }, ...]
+// found.repos: [{ repo: "ci/components", root: "/home/me/code/group/ci/components", linkedWorktree: false, submodule: false }, ...]
 
 const target = await resolveRepoTarget("/home/me/code/group", "ci/components");
 // target.root is the real path of the Git top-level directory.
@@ -36,18 +36,21 @@ A bad selector throws `RepoTargetError`. A Git failure throws a plain `Error`, f
 
 `discoverRepos(base, options)` searches 3 directory levels below `base` by default. It does these things:
 
-- It stops at each repository and does not search inside it.
+- It searches inside each repository that it finds. It lists a repository inside a repository, for example a submodule.
 - It does not follow symlinked directories.
-- It skips `.git`, `.worktrees`, `.scratch-*`, `node_modules`, `.terraform`, `venv`, and `.venv`. Add names with `exclude`.
-- It checks each `.git` entry with Git. It reports a bad entry in `issues`.
+- It skips `.git`, `.worktrees`, `.scratch-*`, `node_modules`, `.terraform`, `venv`, and `.venv`. Add names with `exclude`. The rules apply inside repositories too.
+- It checks each `.git` entry with Git. It reports a bad entry in `issues`, and it still searches inside that directory.
 - It sets `truncated` when a limit stops the search. The time limit also caps each Git call.
+- It sets `truncated` when a directory at `maxDepth` has child directories, because it does not open those children. Raise `maxDepth` to search them.
+- Inside a found repository, a directory at `maxDepth` does not set `truncated`. Discovery does not find a repository below `maxDepth` inside another repository.
+- It sets `linkedWorktree` when the `.git` file names a `worktrees/` Git directory. It sets `submodule` when the file names a `modules/` Git directory. A repository with a `.git` directory, or with a separate Git directory, has neither flag.
 
 Discovery changes no files and no Git state. It runs one Git process for each `.git` entry that it finds.
 
 | Option | Default | Limit |
 | --- | --- | --- |
 | `path` | `.` | Relative to `base`, without `..` and without symlinks |
-| `maxDepth` | 3 | 1 to 8 |
+| `maxDepth` | 3 | 1 to 8. The base directory is level 0. |
 | `limit` | 200 repositories | 1 to 1 000 |
 | `maxDirectories` | 5 000 | 1 to 100 000 |
 | `budgetMs` | 30 000 | 1 to 600 000 |
@@ -74,6 +77,7 @@ Other Git failures throw. A bare repository throws, because it has no work tree.
 | `RepoTargetError` | class | Identify a bad selector, separate from a Git failure. |
 | `RepoTarget` | type | Return `repo`, `root`, and `base`. |
 | `RepoDiscovery` | type | Return `repos`, `issues`, and `truncated`. |
+| `DiscoveredRepo` | type | Return `repo`, `root`, `linkedWorktree`, and `submodule`. |
 | `RepoOptions` | type | Configure the Git runner, cancellation, and Git time limit. |
 | `DiscoveryOptions` | type | Configure the search path, depth, and limits. |
 

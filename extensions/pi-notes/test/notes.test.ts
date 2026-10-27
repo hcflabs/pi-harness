@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -30,14 +31,16 @@ async function harness(t: TestContext) {
 		[first, { repository: canonicalRepository, worktree: await realpath(first), gitDir: await realpath(firstGitDir) }],
 		[second, { repository: canonicalRepository, worktree: await realpath(second), gitDir: await realpath(secondGitDir) }],
 	]);
+	const killed = new Set<string>();
 	const handlers: Record<string, CommandHandler> = {};
 	let sessionStart: ((event: unknown, ctx: ExtensionContext) => Promise<void> | void) | undefined;
 	const pi = {
 		exec: async (_command: string, _args: string[], options: { cwd?: string }) => {
 			const identity = options.cwd ? identities.get(options.cwd) : undefined;
+			if (options.cwd && killed.has(options.cwd)) return { code: 1, killed: true, stdout: "", stderr: "" };
 			return identity
 				? { code: 0, killed: false, stdout: `${identity.worktree}\n${identity.repository}\n${identity.gitDir}\n`, stderr: "" }
-				: { code: 128, killed: false, stdout: "", stderr: "not a git worktree" };
+				: { code: 128, killed: false, stdout: "", stderr: "kein Git-Repository" };
 		},
 		on(event: string, handler: (event: unknown, ctx: ExtensionContext) => Promise<void> | void) {
 			if (event === "session_start") sessionStart = handler;
@@ -71,6 +74,7 @@ async function harness(t: TestContext) {
 		second,
 		firstGitDir,
 		identities,
+		killed,
 		handlers,
 		context,
 		runSessionStart: (ctx: ExtensionContext) => sessionStart!({}, ctx),
@@ -206,4 +210,110 @@ test("startup and mutations prune stale records, preserve malformed files, and c
 	assert.equal(h.widget(), undefined);
 	await assert.rejects(readFile(currentPath, "utf8"), { code: "ENOENT" });
 	assert.equal(await readFile(malformedPath, "utf8"), "{broken user data");
+});
+
+const notesDir = (agentDir: string) => join(agentDir, "config", "pi-notes");
+const noteFiles = async (agentDir: string) => (await readdir(notesDir(agentDir)).catch(() => [])).filter((name) => name.endsWith(".json"));
+
+test("outside a Git repository, notes use the real path of cwd as key", async (t) => {
+	const h = await harness(t);
+	const plain = join(h.agentDir, "plain");
+	const link = join(h.agentDir, "link");
+	await mkdir(plain);
+	await symlink(plain, link);
+	const real = await realpath(plain);
+	const ctx = h.context(link);
+
+	await h.runSessionStart(ctx);
+	assert.equal(h.widget(), undefined);
+	assert.equal(h.notified(), undefined);
+	await h.handlers.note!("parent note", ctx);
+	assert.equal(h.notified(), undefined);
+	assert.deepEqual(h.widget(), ["1. parent note"]);
+	const expected = `${createHash("sha256").update(real).digest("hex")}.json`;
+	assert.deepEqual(await noteFiles(h.agentDir), [expected]);
+	const record = parseNotes(await readFile(join(notesDir(h.agentDir), expected), "utf8"));
+	assert.equal(record.worktree, real);
+
+	await h.runSessionStart(h.context(plain));
+	assert.deepEqual(h.widget(), ["1. parent note"]);
+	const sibling = join(h.agentDir, "sibling");
+	await mkdir(sibling);
+	await h.runSessionStart(h.context(sibling));
+	assert.equal(h.widget(), undefined);
+
+	h.pickWith(async (options) => options[0]);
+	await h.handlers["note-rm"]!("", ctx);
+	assert.equal(h.notified(), undefined);
+	assert.equal(h.widget(), undefined);
+	await h.handlers.note!("again", ctx);
+	await h.handlers["note-clear"]!("", ctx);
+	assert.equal(h.notified(), undefined);
+	assert.equal(h.widget(), undefined);
+	assert.deepEqual(await noteFiles(h.agentDir), []);
+});
+
+test("startup removes notes of a deleted directory and keeps notes of an existing directory", async (t) => {
+	const h = await harness(t);
+	const kept = join(h.agentDir, "kept");
+	const gone = join(h.agentDir, "gone");
+	await Promise.all([mkdir(kept), mkdir(gone)]);
+	await h.handlers.note!("kept", h.context(kept));
+	await h.handlers.note!("gone", h.context(gone));
+	assert.equal((await noteFiles(h.agentDir)).length, 2);
+	await rm(gone, { recursive: true });
+	await h.runSessionStart(h.context(kept));
+	assert.equal((await noteFiles(h.agentDir)).length, 1);
+	assert.deepEqual(h.widget(), ["1. kept"]);
+});
+
+test("a directory that becomes a repository keeps its notes file until /note-clear", async (t) => {
+	const h = await harness(t);
+	const dir = join(h.agentDir, "later-repo");
+	const gitDir = join(dir, ".git");
+	await mkdir(dir);
+	const ctx = h.context(dir);
+	await h.handlers.note!("before git init", ctx);
+	await mkdir(gitDir);
+	h.identities.set(dir, { repository: await realpath(gitDir), worktree: await realpath(dir), gitDir: await realpath(gitDir) });
+	await h.runSessionStart(ctx);
+	assert.equal((await noteFiles(h.agentDir)).length, 1);
+	assert.match(h.widget()![0]!, /old worktree/);
+	await h.handlers["note-clear"]!("", ctx);
+	assert.equal(h.widget(), undefined);
+	assert.deepEqual(await noteFiles(h.agentDir), []);
+});
+
+test("other Git failures stay errors and write nothing", async (t) => {
+	const h = await harness(t);
+	const killedDir = join(h.agentDir, "killed");
+	const brokenDir = join(h.agentDir, "broken");
+	const missingGitDir = join(h.agentDir, "missing-git");
+	await Promise.all([killedDir, brokenDir, missingGitDir].map((path) => mkdir(path)));
+	// A .git file with invalid content makes Git fail although the directory has a repository marker.
+	await writeFile(join(brokenDir, ".git"), "not a gitfile\n");
+	h.killed.add(killedDir);
+
+	const check = async (dir: string) => {
+		const ctx = h.context(dir);
+		h.resetNotification();
+		await h.runSessionStart(ctx);
+		assert.equal(h.widget(), undefined);
+		await h.handlers.note!("must fail", ctx);
+		assert.ok(h.notified(), `/note in ${dir} must report an error`);
+		h.resetNotification();
+		await h.handlers["note-clear"]!("", ctx);
+		assert.ok(h.notified(), `/note-clear in ${dir} must report an error`);
+		h.resetNotification();
+		await h.handlers["note-rm"]!("", ctx);
+		assert.ok(h.notified(), `/note-rm in ${dir} must report an error`);
+		assert.deepEqual(await noteFiles(h.agentDir), []);
+	};
+	await check(killedDir);
+	await check(brokenDir);
+
+	const previousPath = process.env.PATH;
+	process.env.PATH = join(h.agentDir, "no-such-bin");
+	t.after(() => { process.env.PATH = previousPath; });
+	await check(missingGitDir);
 });

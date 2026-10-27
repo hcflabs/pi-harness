@@ -12,14 +12,26 @@ pi install npm:@hcflabs/pi-deps
 
 Run `/deps` in a trusted repository. Create a worktree through Git, then open Pi there in TUI mode to see install progress.
 
+If Pi runs in a parent directory that is not a Git repository, run `/deps <repo>`. See [Parent directory](#parent-directory).
+
 | Surface | Type | Purpose |
 | --- | --- | --- |
-| `/deps` | command | For humans: enable or disable dependency preparation for future worktrees. Works from any worktree in the repository. |
+| `/deps [repo]` | command | For humans: enable or disable dependency preparation for future worktrees. Works from any worktree in the repository. Needs `repo` in a parent directory. |
 | Pi footer status | ui | For TUI users: show a dim spinner and elapsed install time, without command output. Success clears it silently; failures show errors and log paths. |
 
 The shared `post-checkout` hook applies to every worktree. The extension never overwrites or removes hooks without its marker.
 
 After package updates, run `/deps` twice in each opted-in repository to replace the copied hook.
+
+### Parent directory
+
+`repo` is a path relative to the Pi working directory. It must name the top-level directory of a Git repository. A path with `..`, an absolute path, a path that leaves the working directory, and a subdirectory of a repository fail with a message. A repository path also works inside a repository.
+
+`/deps` without `repo` in a parent directory changes nothing. It fails, names the `repo` argument, and lists up to 10 repos that it found below the working directory. The search has limits for depth, directory count, and time. The message says when more repos may exist.
+
+A session in a parent directory has no Git directory. It watches no install at start. When `/deps <repo>` enables a repo in such a session, Pi reads the status file in the Git directory of that repo one time. If an install is running, Pi shows the progress until it ends. If there is no status file, the watch ends.
+
+The watch covers only the selected checkout. It does not cover a worktree that Git creates later, because that worktree has its own Git directory. Open Pi in the new worktree to see its progress. A session that starts in a repository keeps watching its own checkout when you run `/deps <repo>`.
 
 ## Flow
 

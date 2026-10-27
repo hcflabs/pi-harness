@@ -460,7 +460,9 @@ function unavailableInventory(
 	};
 }
 
-/** Return bounded discovery hints from the Git index and Pi's effective skill registry. */
+/** Return bounded discovery hints from the Git index and Pi's effective skill registry.
+ * Outside a Git repository, both modes return the unavailable inventory.
+ * After the Git root is known, "required" mode throws on a failure and "optional" mode returns the unavailable inventory. */
 export async function inventoryRepository(
 	pi: InventoryPi,
 	ctx: InventoryContext,
@@ -469,10 +471,7 @@ export async function inventoryRepository(
 	throwIfAborted(ctx.signal);
 	const gitRoot = await resolveGitRoot(ctx);
 	throwIfAborted(ctx.signal);
-	if (!gitRoot) {
-		if (mode === "optional") return unavailableInventory(REPOSITORY_UNAVAILABLE_REASON);
-		throw new Error("Repository inventory requires a Git repository.");
-	}
+	if (!gitRoot) return unavailableInventory(REPOSITORY_UNAVAILABLE_REASON);
 
 	try {
 		const index = parseIndex((await runGit(gitRoot, ["--no-replace-objects", "ls-files", "--stage", "-z"], ctx.signal, INDEX_STDOUT_BYTES)).stdout);

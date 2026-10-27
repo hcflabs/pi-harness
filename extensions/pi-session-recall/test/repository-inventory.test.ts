@@ -182,11 +182,11 @@ describe("repository inventory", { concurrency: false }, () => {
 		}
 	});
 
-	it("returns the optional unavailable shape outside Git and fails required mode", async () => {
+	it("returns the unavailable shape outside Git in both modes", async () => {
 		const cwd = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-recall-not-git-")));
 		try {
 			const context = { cwd, signal: new AbortController().signal };
-			assert.deepEqual(await inventoryRepository(makePi(), context, "optional"), {
+			const unavailable = {
 				available: false,
 				reason: REPOSITORY_UNAVAILABLE_REASON,
 				packageScripts: [],
@@ -194,8 +194,9 @@ describe("repository inventory", { concurrency: false }, () => {
 				skills: [],
 				agentInstructions: [],
 				worktreeVerified: false,
-			});
-			await assert.rejects(inventoryRepository(makePi(), context), /requires a Git repository/);
+			};
+			assert.deepEqual(await inventoryRepository(makePi(), context, "optional"), unavailable);
+			assert.deepEqual(await inventoryRepository(makePi(), context), unavailable);
 		} finally {
 			fs.rmSync(cwd, { recursive: true, force: true });
 		}

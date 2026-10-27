@@ -1549,6 +1549,39 @@ describe("preparation rows", () => {
 		assert.deepEqual(rows.map((row) => row.cwd), [root, path.join(root, "packages", "app")]);
 	});
 
+	it("matches session cwds and the repository root through symlinks", { skip: process.platform === "win32" }, () => {
+		const real = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pi-session-recall-real-")));
+		const link = path.join(tmp, "link-to-real");
+		fs.symlinkSync(real, link);
+		fs.mkdirSync(path.join(real, "pkg"));
+		try {
+			const viaLink = writeFixture("--prep-via-link--", "via-link.jsonl", [
+				sessionHeader({ cwd: path.join(link, "pkg"), timestamp: "2026-01-03T00:00:00.000Z" }),
+				msg("pl", "user", "stored through the symlink"),
+			]);
+			const direct = writeFixture("--prep-direct--", "direct.jsonl", [
+				sessionHeader({ cwd: real, timestamp: "2026-01-02T00:00:00.000Z" }),
+				msg("pdr", "user", "stored as the real path"),
+			]);
+			const deleted = writeFixture("--prep-deleted--", "deleted.jsonl", [
+				sessionHeader({ cwd: path.join(link, "removed", "dir"), timestamp: "2026-01-01T00:00:00.000Z" }),
+				msg("pdl", "user", "stored under a directory that no longer exists"),
+			]);
+			writeFixture("--prep-sibling-link--", "sibling.jsonl", [
+				sessionHeader({ cwd: `${link}-sibling`, timestamp: "2026-01-04T00:00:00.000Z" }),
+				msg("psl", "user", "prefix sibling must stay outside"),
+			]);
+			syncSessions(sessionsDir, dbPath, { cap: 10 });
+
+			const expected = [viaLink, direct, deleted];
+			assert.deepEqual(getPreparationRows(dbPath, { limit: 10, repositoryRoot: real }).map((row) => row.path), expected);
+			assert.deepEqual(getPreparationRows(dbPath, { limit: 10, repositoryRoot: link }).map((row) => row.path), expected);
+			assert.equal(getPreparationRows(dbPath, { limit: 10, repositoryRoot: real })[0].cwd, path.join(link, "pkg"), "rows keep the stored cwd");
+		} finally {
+			fs.rmSync(real, { recursive: true, force: true });
+		}
+	});
+
 	it("collapses parent/child and external-parent siblings before limit with deterministic representatives", () => {
 		const root = path.join(tmp, "repo");
 		const parent = writeFixture("--prep-parent--", "parent.jsonl", [

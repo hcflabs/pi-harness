@@ -50,7 +50,7 @@ It has no policy for Roles, config, admission, Herdr, suites, or integration. `p
 
 `pi-subagent` registers a read-only `subagent_repos` tool. It lists child repositories and returns the `repo` selector that the other tools accept. Rules:
 
-- The default depth is 3. Discovery stops at a repository and does not descend into it.
+- The default depth is 3. Discovery also searches inside a repository for repositories, such as submodules. It reports truncation when a directory at the depth limit has child directories.
 - It does not follow symlinked directories.
 - It skips `.git`, `.worktrees`, `.scratch-*`, `node_modules`, `.terraform`, and `venv`.
 - It checks each candidate with Git. A `.git` marker alone is not proof.

@@ -5,7 +5,7 @@ Pi Add Dir brings external instructions, Skills, and file search into a Pi sessi
 ## Language
 
 **External directory**:
-A directory outside the current Pi working directory that is added to the session.
+A directory that Pi does not load by itself and that is added to the session. It is not the working directory or an ancestor. It can be a child directory.
 _Avoid_: Project root, current working directory
 
 **External context**:

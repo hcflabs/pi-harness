@@ -853,9 +853,49 @@ export function searchIndex(
 
 export interface PreparationRowOptions {
 	limit: number;
-	/** Canonical repository root. Omit to sample all indexed sessions. */
+	/** Repository root, or any directory. A session matches when its stored
+	 * cwd is this directory or below it. Both sides are compared after symlink
+	 * resolution. Omit to sample all indexed sessions. */
 	repositoryRoot?: string;
 	currentSessionPath?: string;
+}
+
+/** Resolve symlinks in the deepest existing ancestor of an absolute path and
+ * keep the rest as written. A stored cwd can name a directory that no longer
+ * exists. Return `undefined` for a relative path. */
+function canonicalizePath(value: string): string | undefined {
+	if (!path.isAbsolute(value)) return undefined;
+	let existing = path.resolve(value);
+	const rest: string[] = [];
+	for (;;) {
+		try {
+			return path.join(fs.realpathSync(existing), ...rest);
+		} catch {
+			const parent = path.dirname(existing);
+			if (parent === existing) return undefined;
+			rest.unshift(path.basename(existing));
+			existing = parent;
+		}
+	}
+}
+
+function isSameOrBelow(candidate: string, root: string): boolean {
+	const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+	return candidate === root || candidate.startsWith(prefix);
+}
+
+/** List the stored session cwds that are the root or below it. SQL cannot
+ * resolve symlinks, so this check runs on each distinct cwd. */
+function cwdsInScope(db: DatabaseSync, root: string): string[] {
+	const canonicalRoot = canonicalizePath(root);
+	const stored = db.prepare("SELECT DISTINCT cwd FROM sessions WHERE cwd IS NOT NULL").all() as { cwd: string }[];
+	return stored
+		.map((row) => row.cwd)
+		.filter((cwd) => {
+			if (isSameOrBelow(cwd, root)) return true;
+			const canonicalCwd = canonicalRoot === undefined ? undefined : canonicalizePath(cwd);
+			return canonicalCwd !== undefined && isSameOrBelow(canonicalCwd, canonicalRoot!);
+		});
 }
 
 /** Select deterministic, repository-scoped pattern-miner candidates from the
@@ -865,21 +905,18 @@ export function getPreparationRows(
 	dbPath: string,
 	opts: PreparationRowOptions,
 ): PreparationSessionRow[] {
-	const clauses: string[] = [];
-	const params: string[] = [];
-	if (opts.repositoryRoot !== undefined) {
-		const prefix = opts.repositoryRoot.endsWith(path.sep)
-			? opts.repositoryRoot
-			: opts.repositoryRoot + path.sep;
-		clauses.push("(s.cwd = ? OR substr(s.cwd, 1, length(?)) = ?)");
-		params.push(opts.repositoryRoot, prefix, prefix);
-	}
-	if (opts.currentSessionPath !== undefined) {
-		clauses.push("s.path <> ?");
-		params.push(opts.currentSessionPath);
-	}
-	const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
 	return withDb(dbPath, (db) => {
+		const clauses: string[] = [];
+		const params: string[] = [];
+		if (opts.repositoryRoot !== undefined) {
+			clauses.push("s.cwd IN (SELECT value FROM json_each(?))");
+			params.push(JSON.stringify(cwdsInScope(db, opts.repositoryRoot)));
+		}
+		if (opts.currentSessionPath !== undefined) {
+			clauses.push("s.path <> ?");
+			params.push(opts.currentSessionPath);
+		}
+		const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
 		const rows = db.prepare(`
 			WITH eligible AS (
 				SELECT s.path, s.cwd, s.name, s.started_at, s.preview,
