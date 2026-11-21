@@ -38,11 +38,11 @@ test("stop accepts native unnamed unrelated agents without authorizing mutations
 	const tab = { name: "owned", tabId: "owned-tab", paneId: "owned-pane", leasePath, sessionFile: join(cwd, "session.jsonl") };
 	for (const paneId of ["unrelated-pane", "owned-pane"]) {
 		const exec: ExtensionAPI["exec"] = async (command, args) => {
-			if (command === "lsof") return { code: 1, stdout: "", stderr: "", killed: false };
+			if (command === "lsof") return { code: 1, stdout: "", stderr: "", killed: false, truncated: false };
 			assert.equal(args[1], "list", "the native-shape probe forbids all mutation calls");
 			const result = args[0] === "agent" ? { type: "agent_list", agents: [{ agent: "pi", pane_id: paneId, tab_id: "unrelated-tab" }] }
 				: { type: "pane_list", panes: [] };
-			return { code: 0, stdout: JSON.stringify({ result }), stderr: "", killed: false };
+			return { code: 0, stdout: JSON.stringify({ result }), stderr: "", killed: false, truncated: false };
 		};
 		const stopping = createDirectHerdr({ exec }, cwd, 1000).stop(tab);
 		if (paneId === "owned-pane") await assert.rejects(stopping, /one exact owned agent/);

@@ -518,7 +518,7 @@ Before launch, the extension checks each selected entry against Pi's documented 
 - `auth.provider` uses plain HTTP outside `localhost`, `127.0.0.1`, or `[::1]`.
 - `oauth.authServerMetadataUrl` does not use HTTPS outside those hosts.
 
-The extension never modifies the file. Fix the entry or choose another server. The extension passes valid `auth`, `oauth`, and `description` fields through, so Pi's native provider auth and OAuth apply. `oauth.clientRegistration` must be `dcr` or `cimd`. A `cimd` entry cannot use `clientId` or `clientName`. Any `callbackUrl` must use localhost or 127.0.0.1 with path `/callback`.
+The extension never modifies the file. Fix the entry or choose another server. The extension passes valid `auth`, `oauth`, and `description` fields through, so Pi's native provider auth and OAuth apply. `oauth.clientRegistration` must be `auto`, `dcr`, or `cimd`. A `cimd` entry cannot use `clientId` or `clientName`. Any `callbackUrl` must use localhost or 127.0.0.1 with path `/callback`.
 
 The extension still ignores project MCP overrides. A project cannot change the global server allowlist or exposure of the Role. Missing Skills, tools, MCP servers, Roles, or routes fail before productive work starts. The extension excludes Main-only delegation, integration, and recovery tools, `herdr_handoff`, `herdr_command`, and `ask_question` from children.
 

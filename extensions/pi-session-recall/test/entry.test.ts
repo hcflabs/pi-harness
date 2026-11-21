@@ -196,7 +196,7 @@ describe("session_search entry point", () => {
 		const theme = { fg: (_color: string, text: string) => text };
 		initTheme("dark");
 
-		const preview = tool.renderResult(result, { expanded: false }, theme, {});
+		const preview = tool.renderResult(result, { expanded: false }, theme, { keyHint: (_key: string, description: string) => `ctrl+o ${description}` });
 		const collapsed = preview.render(width);
 		assert.equal(preview.render(width), collapsed);
 		assert.notEqual(preview.render(width + 10), collapsed);

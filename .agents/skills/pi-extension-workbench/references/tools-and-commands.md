@@ -9,7 +9,7 @@ Example paths below are relative to `examples/extensions/`.
 
 | Need | Native choice | Reference |
 |---|---|---|
-| Small model-callable operation | `registerTool`, narrow TypeBox schema | `hello.ts` |
+| Small model-callable operation | `registerTool`, narrow TypeBox schema (`Type` from `typebox`) | `hello.ts` |
 | Data consumed by scripts | `outputSchema` + `structuredContent` | Installed `Tools` section |
 | Orchestrate existing tools | `ctx.executeTool()`; list with `ctx.tools`; declare `reachesTools` | Installed `Tools` and `Tool exposure` sections |
 | Reduce declarations or discover tools | `exposure`, `namespace` | Installed `Tool exposure` section |
@@ -26,14 +26,23 @@ Example paths below are relative to `examples/extensions/`.
 - Pi 1.3 rejects malformed completed tool-call arguments before execution.
   Use native argument validation; do not execute partially parsed arguments.
   Custom providers and message transforms must preserve `ToolCall.argumentsError`.
+- Pi validates tool arguments as JSON Schema with `@earendil-works/pi-schema`.
+  Pi first coerces loose values, such as numeric strings. `Type.Refine()`,
+  codecs, and `Format.Set()` formats do not apply: check them in `execute()`.
 - Nested calls use normal validation/interception but do not add transcript
   entries. Surface needed results in the parent result. Pi aggregates nested
   tool usage; do not count it twice. Report usage for the tool's own model calls.
 - Honor cancellation. Use `pi.exec(command, args, { signal })` rather than shell
-  assembly. Shared in-memory mutation may need sequential execution; file
+  assembly. Check `code`, `killed`, and `truncated`. After a signal, `code` is
+  128 plus the signal number. `maxBuffer` limits stdout and stderr together.
+  Shared in-memory mutation may need sequential execution; file
   read-modify-write needs `withFileMutationQueue()` around the entire operation.
 - Use `StringEnum` from `@earendil-works/pi-ai`, not literal unions for Google
-  compatibility. Name the tool in each `promptGuidelines` bullet.
+  compatibility. Name the tool in each `promptGuidelines` bullet. `StringEnum`
+  returns a pi-schema type, so TypeBox `Static` cannot infer it. When you need
+  `Static`, use `Type.Unsafe<T>({ type: "string", enum: [...] })`.
+- Pi ignores `GrepOperations.readFile`. To search a remote system, override the
+  grep tool's `execute()`. `ReadOperations.createReadStream` lets `read` stream.
 - Custom renderers must handle partial, absent, error, collapsed, and expanded
   results. `terminate: true` skips follow-up only when the whole batch agrees.
 
@@ -71,11 +80,14 @@ restrictions.
 | Actual user turn | `sendUserMessage` | `send-user-message.ts` |
 | Stored model-context message | `sendMessage` | `message-renderer.ts` |
 | Durable non-model data | `appendEntry` | `entry-renderer.ts` |
-| In-process signal, without persistence/replay | Namespaced `pi.events` | `event-bus.ts` |
+| In-process signal, without persistence/replay | Namespaced `pi.events`; Pi reports a throwing handler as an extension error | `event-bus.ts` |
 
 Validate command arguments; choose message delivery and `triggerTurn`
 deliberately. A starting run counts as busy, also during
 `before_agent_start`: `ctx.isIdle()` is false, `sendMessage` queues into that
 run, and `sendUserMessage` needs `deliverAs`. Session-changing operations are
 command-context-only: lifecycle handlers can deadlock. After replacement, use the fresh `withSession` context;
-after `await ctx.reload()`, do not reuse the old extension runtime.
+after `await ctx.reload()`, do not reuse the old extension runtime. RPC and SDK
+sessions reject `ctx.reload()` while a response or compaction runs: catch it.
+`ctx.switchSession()` to a session whose folder is gone asks Continue, Fork, or
+Cancel in interactive mode. Handle a cancelled result.

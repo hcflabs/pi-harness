@@ -8,7 +8,7 @@ Example paths below are relative to `examples/extensions/`.
 | Need | Event/API | Example |
 |---|---|---|
 | Start cwd/session-bound resources | `session_start` | `file-trigger.ts`, `ssh.ts` |
-| Release timers, watchers, processes, sockets | `session_shutdown` | `mac-system-theme.ts`, `sandbox/index.ts` |
+| Release timers, watchers, processes, sockets | `session_shutdown` | `mac-system-theme.ts`, `gondolin/index.ts` |
 | Guard session transitions/compaction | Matching `session_before_*` | `confirm-destructive.ts`, `dirty-repo-guard.ts` |
 | Restore branch-dependent state | `session_start`, `session_tree`, `getBranch()` | `todo.ts`, `tools.ts` |
 | Modify structured prompt/conversation | `before_agent_start`, `context` | `pirate.ts`, `plan-mode/index.ts` |

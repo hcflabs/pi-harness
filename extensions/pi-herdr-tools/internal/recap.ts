@@ -91,7 +91,7 @@ export default function idleRecapExtension(pi: ExtensionAPI): void {
 
 	const recap = async (ctx: ExtensionContext) => {
 		timer = undefined;
-		const leaf = ctx.sessionManager.getLeafId();
+		const leaf = conversationLeaf(ctx.sessionManager);
 		if (leaf === recappedLeaf || !idle(ctx)) return;
 		const messages = buildSessionContext(ctx.sessionManager.getEntries(), leaf).messages;
 		// buildMergeTranscript keeps only user and assistant turns; summaries carry the goal after compaction or branch navigation.
@@ -111,7 +111,7 @@ export default function idleRecapExtension(pi: ExtensionAPI): void {
 		active = controller;
 		try {
 			const text = await generateRecap(prompt, ctx, controller.signal, reportTaskModels);
-			if (active !== controller || !idle(ctx) || ctx.sessionManager.getLeafId() !== leaf) return;
+			if (active !== controller || !idle(ctx) || conversationLeaf(ctx.sessionManager) !== leaf) return;
 			recappedLeaf = leaf;
 			if (ctx.mode === "tui") {
 				ctx.ui.setWidget(WIDGET_KEY, (_tui, theme) => ({
@@ -156,4 +156,11 @@ export default function idleRecapExtension(pi: ExtensionAPI): void {
 	pi.on("agent_start", (_event, ctx) => cancel(ctx));
 	pi.on("session_tree", (_event, ctx) => cancel(ctx));
 	pi.on("session_shutdown", (_event, ctx) => cancel(ctx));
+}
+
+/** Leaf ID without trailing usage entries. Pi appends a usage entry for each cache warm. */
+function conversationLeaf(sessionManager: ExtensionContext["sessionManager"]): string | null {
+	let entry = sessionManager.getLeafEntry();
+	while (entry?.type === "usage") entry = entry.parentId ? sessionManager.getEntry(entry.parentId) : undefined;
+	return entry?.id ?? null;
 }
