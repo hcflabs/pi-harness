@@ -672,6 +672,10 @@ export async function registerBtwExtension(
 						pane: paneId,
 						args: agentStartArgs,
 						options: { timeout: 45_000 },
+						// `pane split` returns the pane before its shell reads input. Wait for
+						// the shell, so the launch command cannot be typed into a busy tty and
+						// be lost.
+						freshPane: true,
 						shouldRetry: (candidate) => !candidate.killed && launchGeneration === sessionGeneration,
 					});
 				} catch (error) {

@@ -227,6 +227,12 @@ export async function launchPiAgent(
 			pane,
 			args: input.args,
 			options: { cwd },
+			// Every caller passes a pane it just created: a new tab, a worktree root
+			// pane, or an extra tab. Herdr returns those IDs before the pane shell
+			// reads input, and shell startup files can still own the foreground. Wait
+			// for the shell, so the launch command cannot be typed into a busy tty and
+			// be lost.
+			freshPane: true,
 			onPaneBusy: input.onPaneBusy
 				? async () => (pane = await input.onPaneBusy!())
 				: undefined,

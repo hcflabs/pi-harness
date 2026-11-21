@@ -1,6 +1,6 @@
 # Herdr Version Upgrade
 
-Audit every stable Herdr release (`v*` tags in [`herdrdev/herdr`](https://github.com/herdrdev/herdr/releases)), including patches. Skip preview builds. Herdr is not an npm dependency: our packages call the `herdr` CLI found on `PATH`, so a Herdr release breaks them at runtime, not at install time or during a typecheck. An audit causes a release only when a decision changes a package.
+Audit every stable Herdr release (`v*` tags in [`herdrdev/herdr`](https://github.com/herdrdev/herdr/releases)), including patches. Skip preview builds. Herdr is not an npm dependency: our packages call the `herdr` CLI found on `PATH`, so a Herdr release breaks them at runtime, not at install time or during a typecheck. An audit causes a release only when a decision changes a package. [The CLI lifecycle reference](herdr-cli-lifecycle.md) records the creation, readiness, focus, and cleanup rules that the consumers depend on.
 
 Set `TARGET` to the target version and `BASE` to the last audited version below. Record both, the `origin/main` SHA, the consumer list, decisions, and validation status in `.context/progress.md`.
 

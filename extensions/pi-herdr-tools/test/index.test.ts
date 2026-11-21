@@ -18,7 +18,7 @@ import {
 	type ContextStorePort,
 } from "../internal/btw.ts";
 import { fixturePayload } from "./fixtures.ts";
-import { shellProbe } from "./helper.ts";
+import { shellProbe, withShellStartup } from "./helper.ts";
 
 type Command = {
 	handler: (args: string, ctx: any) => Promise<void>;
@@ -405,6 +405,32 @@ test("parent command captures native context and launches Herdr without leaking 
 		]);
 		// tools inherit (default) passes the exact active parent tool set
 		assert.deepEqual(startArgs.slice(-2), ["--tools", "read,bash"]);
+	});
+});
+
+test("parent /btw waits for the fresh side pane shell before it starts the agent", async () => {
+	await withParentEnvironment(async () => {
+		const store = new FakeStore();
+		const harness = await createHarness(store, herdrExec());
+		const ctx = createCommandContext();
+		// `pane split` returns the pane before its shell reads input. Shell startup
+		// files own the foreground for two polls, so no launch command is typed first.
+		await withShellStartup([777, 778], async () => {
+			await harness.commands.get("btw")?.handler("", ctx);
+		});
+		harness.cleanup();
+
+		assert.deepEqual(harness.execCalls.map((call) => call.args.slice(0, 2)), [
+			["pane", "split"],
+			["pane", "process-info"],
+			["pane", "process-info"],
+			["pane", "process-info"],
+			["pane", "run"],
+			["pane", "read"],
+			["agent", "start"],
+		]);
+		assert.equal(store.removed.length, 0);
+		assert.equal(ctx.notifications.length, 0);
 	});
 });
 

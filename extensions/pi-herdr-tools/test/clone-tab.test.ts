@@ -10,6 +10,7 @@ import {
 	tabHarness as harness,
 	withEnvironment,
 	withPane,
+	withShellStartup,
 } from "./helper.ts";
 
 test("/clone-tab retries a briefly busy root pane, copies only the active path, and launches exact Herdr argv", async () => {
@@ -85,6 +86,34 @@ test("/clone-tab retries a briefly busy root pane, copies only the active path, 
 			assert.equal(await readFile(data.sessionFile, "utf8"), before);
 			assert.equal(app.notifications[0]?.type, "info");
 		});
+	} finally {
+		await rm(data.root, { recursive: true, force: true });
+	}
+});
+
+test("/clone-tab waits for the new tab shell before it types the launch command", async () => {
+	const data = await fixture();
+	try {
+		await withPane("pane-alias", () => withShellStartup([777, 778], async () => {
+			const app = harness(data.manager, data.cwd);
+			await app.command("", app.ctx);
+
+			// Herdr returns the tab before its shell reads input. Shell startup files
+			// own the foreground for two polls, so no command is typed before the probe
+			// passes.
+			assert.deepEqual(app.events.slice(0, 8), [
+				"exec:pane get",
+				"exec:workspace get",
+				"exec:tab create",
+				"exec:pane process-info",
+				"exec:pane process-info",
+				"exec:pane process-info",
+				"exec:pane run",
+				"exec:pane read",
+			]);
+			assert.equal(app.events.filter((event) => event === "exec:agent start").length, 1);
+			assert.equal(app.notifications[0]?.type, "info");
+		}));
 	} finally {
 		await rm(data.root, { recursive: true, force: true });
 	}

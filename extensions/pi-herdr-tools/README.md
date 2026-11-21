@@ -60,6 +60,8 @@ Both commands require `HERDR_ENV=1` and `HERDR_PANE_ID`. Pane, session-path, and
 
 Clone tabs keep the current working directory. Worktree clones use the new checkout. Pi starts with `--session <absolute-clone-file>`; only successful launches change focus.
 
+A tab or worktree creation returns before the new pane shell reads input. Each clone waits until the shell owns the foreground and draws its prompt. Only then does it start Pi. A shell that still runs startup files can lose the Enter key of a long command.
+
 Worktree creation uses `herdr worktree create --workspace <current-workspace> --no-focus`, or the repository's parent workspace when already in a linked worktree. Herdr creates missing branches from `HEAD`, with checkouts under `worktrees.directory` in grouped workspaces. Clones and handoffs use an extra unfocused tab if a layout plugin such as `herdr-plus` occupies the root pane.
 
 ### Worktree handoff
@@ -84,7 +86,7 @@ The tool never selects a child repository automatically. When `repo` is needed, 
 | `prompt` | Self-contained task prompt. |
 | `repo` | Optional. A Git top-level directory, relative to the Pi working directory. `.` names the working directory. It must not contain `..` or resolve outside that directory. A subdirectory of a repository fails. |
 
-After validation, the tool runs `herdr worktree create --workspace <parent> --branch <branch> --base main --label <label> --no-focus`. With `repo`, it uses `--cwd <repository>` instead of `--workspace <parent>`. Herdr then opens the primary workspace of the repository, or creates it, and does not close it later. It starts Pi without session arguments. It submits `herdr agent prompt <agentName> <prompt> --wait --until working --timeout 30000`, with the prompt as one argument, not a shell command or file. The result includes workspace ID, tab, pane, branch, checkout path, agent name, and `repo` when set.
+After validation, the tool runs `herdr worktree create --workspace <parent> --branch <branch> --base main --label <label> --no-focus`. With `repo`, it uses `--cwd <repository>` instead of `--workspace <parent>`. Herdr then opens the primary workspace of the repository, or creates it, and does not close it later. The tool waits until the new pane shell reads input, then starts Pi without session arguments. It submits `herdr agent prompt <agentName> <prompt> --wait --until working --timeout 30000`, with the prompt as one argument, not a shell command or file. The result includes workspace ID, tab, pane, branch, checkout path, agent name, and `repo` when set.
 
 ### Command panes
 
@@ -117,6 +119,8 @@ The side-thread model receives Main's fixed, compaction-aware context snapshot. 
 ![Side-thread merge delivery.](./docs/btw-merge-sequence.svg)
 
 Run `/btw merge Apply the smallest safe fix` after the answer. The merge request contains user and assistant text, without tool payloads. Pending delivery survives shutdown until consumption or 24-hour stale cleanup. Once idle and authenticated, Main appends the transcript without starting a turn, then submits the prompt.
+
+`/btw` splits the pane, waits until the new pane shell reads input, and then starts Pi. A split returns before its shell is ready.
 
 ### Titles
 

@@ -15,12 +15,25 @@ type Command = (args: string, ctx: ExtensionCommandContext) => Promise<void>;
 type Respond = (args: string[]) => Promise<ExecResult | undefined> | ExecResult | undefined;
 
 let probeToken = "";
+/** Foreground groups that answer the next `pane process-info` polls, as shell startup files would. */
+let startupGroups: number[] = [];
+/** Simulate shell startup files that own the pane foreground before the shell reads input. */
+export async function withShellStartup<T>(groups: number[], run: () => Promise<T>): Promise<T> {
+	startupGroups = [...groups];
+	try {
+		return await run();
+	} finally {
+		startupGroups = [];
+	}
+}
 /** Answer `startPiAgent`'s shell-readiness probe for an idle shell pane; undefined for other commands. */
 export function shellProbe(args: string[]): ExecResult | undefined {
 	if (args[0] !== "pane") return undefined;
 	if (args[1] === "process-info") {
+		const group = startupGroups.shift() ?? 501;
 		return success({ result: { type: "pane_process_info", process_info: {
-			pane_id: args[3], shell_pid: 501, foreground_process_group_id: 501, foreground_processes: [{ pid: 501, name: "zsh" }],
+			pane_id: args[3], shell_pid: 501, foreground_process_group_id: group,
+			foreground_processes: [{ pid: group, name: group === 501 ? "zsh" : "grep" }],
 		} } });
 	}
 	if (args[1] === "run") {
