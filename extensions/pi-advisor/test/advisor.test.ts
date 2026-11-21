@@ -265,6 +265,18 @@ test("a reply is dropped when the leaf changes, input arrives, or Pi is busy bef
 	}
 });
 
+test("a cache warm during the review keeps the reply", async () => {
+	const h = await enabled();
+	const pending = deferred();
+	h.replies.push(pending.reply);
+	await h.settle();
+	const usage = { input: 0, output: 0, cacheRead: 10, cacheWrite: 0, totalTokens: 10, cost: { input: 0, output: 0, cacheRead: 0.01, cacheWrite: 0, total: 0.01 } };
+	h.manager.appendUsage("cache_warm", "test", "model", usage);
+	pending.resolve(BLOCKER);
+	await flush();
+	assert.equal(h.sent.length, 1);
+});
+
 test("a cancelled review is silent; a timeout or model error warns and does not start a turn", async () => {
 	for (const event of ["agent_start", "session_tree", "session_shutdown", "/advisor off"]) {
 		const h = await enabled();

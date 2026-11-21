@@ -1,10 +1,14 @@
-import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawnBounded } from "@hcflabs/pi-process";
 import { gitTopLevel, resolveRepoTarget } from "@hcflabs/pi-repo";
 import { ROLE_TOOL_POLICY_FLAG, roleToolPolicyFromArgv } from "@hcflabs/pi-subagent";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+
+// pi-ai StringEnum returns a pi-schema type, so TypeBox Static cannot infer it.
+function StringEnum<const T extends readonly string[]>(values: T, options: { description?: string } = {}) {
+	return Type.Unsafe<T[number]>({ type: "string", enum: [...values], ...options });
+}
 
 const OUTPUT_BYTES = 32 * 1024;
 const TIMEOUT_MS = 30_000;

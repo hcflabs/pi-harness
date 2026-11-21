@@ -53,7 +53,7 @@ Start a Pi TUI session to see the footer. Run `/open` to open the current direct
 | Second: usage line | Input and output token totals, latest cache-hit rate, response throughput, estimated cost, and context use. | Active model and thinking level. |
 | Third | CodeGraph first, then other extension statuses sorted by key, including Ponytail and `pi-rewind`. | Cumulative agent-work time. |
 
-Token and cost totals include reported tool usage and completed `pi-subagent` background workflows. Response throughput measures output tokens per second from first to last streamed content. It excludes request latency, time to first token, and later provider work, including Claude bridge shutdown. Non-streamed or instantaneous responses show `—`. Other unavailable values show `—` without a percent sign.
+Token and cost totals include reported tool usage, prompt cache warms, and completed `pi-subagent` background workflows. Response throughput measures output tokens per second from first to last streamed content. It excludes request latency, time to first token, and later provider work, including Claude bridge shutdown. Non-streamed or instantaneous responses show `—`. Other unavailable values show `—` without a percent sign.
 
 Virtual models show the latest successful physical model and thinking level after an arrow: `auto • high → gpt-5.6-luna • medium`.
 

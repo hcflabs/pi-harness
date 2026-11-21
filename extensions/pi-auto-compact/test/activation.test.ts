@@ -108,6 +108,16 @@ test("suppresses only empty abort caused by pending extension compaction", async
 			errorMessage: undefined,
 		},
 	});
+
+	// Pi 1.5.1+ reports a cancel during lazy provider setup as stopReason "aborted".
+	const lazyAbort = new AbortController();
+	signal = lazyAbort.signal;
+	handlers.get("session_start")?.({ type: "session_start", reason: "resume" } as never, ctx);
+	lazyAbort.abort();
+	const lazy = { ...aborted, message: { ...aborted.message, stopReason: "aborted" } };
+	assert.deepEqual(handlers.get("message_end")?.(lazy as never, ctx), {
+		message: { ...lazy.message, stopReason: "stop", errorMessage: undefined },
+	});
 });
 
 test("configures threshold and warns about obsolete model fields", async () => {

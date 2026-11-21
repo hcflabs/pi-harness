@@ -1,6 +1,6 @@
 {
   "name": "@hcflabs/pi-task-models",
-  "version": "9.3.1",
+  "version": "9.4.0",
   "description": "Shared task model profiles and routing for hcflabs Pi extensions.",
   "keywords": [
     "pi-package",
@@ -37,9 +37,9 @@
     "pack:check": "npm pack --dry-run"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "^1.3.0",
-    "@earendil-works/pi-coding-agent": "^1.3.0",
-    "@earendil-works/pi-tui": "^1.3.0"
+    "@earendil-works/pi-ai": "^1.6.0",
+    "@earendil-works/pi-coding-agent": "^1.6.0",
+    "@earendil-works/pi-tui": "^1.6.0"
   },
   "repository": {
     "type": "git",
@@ -62,9 +62,9 @@
     "@hcflabs/pi-config-store": "^4.0.0"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "1.3.0",
-    "@earendil-works/pi-coding-agent": "1.3.0",
-    "@earendil-works/pi-tui": "1.3.0",
+    "@earendil-works/pi-ai": "1.6.0",
+    "@earendil-works/pi-coding-agent": "1.6.0",
+    "@earendil-works/pi-tui": "1.6.0",
     "@types/proper-lockfile": "^4.1.4",
     "proper-lockfile": "^4.1.2"
   }

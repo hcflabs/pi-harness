@@ -13,6 +13,8 @@ check its lockfile, scripts, and documented support policy.
 - Use manifest `pi.extensions`, `skills`, `prompts`, and `themes` for static
   resources. Conventional directories work without a manifest; `pi-package` is
   gallery discovery, not a loading requirement. See installed `docs/packages.md`.
+- Pi shows the package changelog (CHANGELOG.md in the root) after an update. Set `pi.changelogPath` to
+  use another file. Version headings must match `version` in `package.json`.
 - Runtime third-party libraries belong in `dependencies`. Host-provided
   `@earendil-works/pi-ai`, `pi-agent-core`, `pi-coding-agent`, `pi-tui` (all under
   `@earendil-works/`), and `typebox` belong in wildcard `peerDependencies`, not

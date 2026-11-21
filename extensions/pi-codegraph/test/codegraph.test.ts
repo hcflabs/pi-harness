@@ -35,7 +35,7 @@ function harness(cwd: string, options: {
 	hasUI?: boolean;
 	mode?: "tui" | "rpc";
 	version?: Awaited<ReturnType<ExtensionAPI["exec"]>>;
-	init?: (signal?: AbortSignal) => Promise<{ code: number; stdout: string; stderr: string; killed: boolean }>;
+	init?: (signal?: AbortSignal) => Promise<{ code: number; stdout: string; stderr: string; killed: boolean; truncated: boolean }>;
 	gitProbe?: (args: string[], signal?: AbortSignal) => Promise<Awaited<ReturnType<ExtensionAPI["exec"]>> | undefined>;
 	explore?: Awaited<ReturnType<ExtensionAPI["exec"]>>;
 	onStatus?: (text: string | undefined) => void;
@@ -62,16 +62,16 @@ function harness(cwd: string, options: {
 		exec: async (command: string, args: string[], opts: { cwd: string; timeout?: number; signal?: AbortSignal }) => {
 			calls.push({ command, args, cwd: opts.cwd, ...(args[0] === "explore" && { timeout: opts.timeout }) });
 			if (command === "codegraph") {
-				if (args[0] === "--version") return options.version ?? { code: 0, stdout: "1.6.0", stderr: "", killed: false };
-				if (args[0] === "explore") return options.explore ?? { code: 0, stdout: "explored", stderr: "", killed: false };
+				if (args[0] === "--version") return options.version ?? { code: 0, stdout: "1.6.0", stderr: "", killed: false, truncated: false };
+				if (args[0] === "explore") return options.explore ?? { code: 0, stdout: "explored", stderr: "", killed: false, truncated: false };
 				if (args[0] === "status") {
 					if (options.status) return options.status;
 					const index = { state: "complete", reindexRecommended: options.reindexRecommended ?? false };
-					return { code: 0, stdout: JSON.stringify({ index }), stderr: "", killed: false };
+					return { code: 0, stdout: JSON.stringify({ index }), stderr: "", killed: false, truncated: false };
 				}
 				if (options.init) return options.init(opts.signal);
 				if (args[0] === "init") await index(opts.cwd);
-				return { code: 0, stdout: "", stderr: "", killed: false };
+				return { code: 0, stdout: "", stderr: "", killed: false, truncated: false };
 			}
 			if (command === "git" && options.gitProbe) {
 				const result = await options.gitProbe(args, opts.signal);
@@ -79,7 +79,7 @@ function harness(cwd: string, options: {
 			}
 			try {
 				const result = await exec(command, args, { cwd: opts.cwd, signal: opts.signal });
-				return { ...result, code: 0, killed: false };
+				return { ...result, code: 0, killed: false, truncated: false };
 			} catch (error) {
 				return error;
 			}
@@ -160,7 +160,7 @@ test("a dismissed prompt is not a decline, and a failed primary init keeps the p
 	await assert.rejects(stat(join(primary, ".git", "pi-codegraph-declined")), { code: "ENOENT" });
 	const failed = harness(worktree, { mode: "tui", confirm: true, init: async () => {
 		await index(primary);
-		return { code: 1, stdout: "", stderr: "primary init failed", killed: false };
+		return { code: 1, stdout: "", stderr: "primary init failed", killed: false, truncated: false };
 	} });
 	failed.start();
 	await failed.shutdown("new");
@@ -243,7 +243,7 @@ test("seed failures record one warning before init without a notification or con
 		if (failure === "lock") await writeFile(join(primary, ".codegraph", "codegraph.lock"), "1");
 		const before = readDiagnostics().length;
 		const run = harness(worktree, {
-			status: failure === "status JSON" ? { code: 0, stdout: "{", stderr: "", killed: false } : undefined,
+			status: failure === "status JSON" ? { code: 0, stdout: "{", stderr: "", killed: false, truncated: false } : undefined,
 			reindexRecommended: failure === "status rejected",
 			gitProbe: async (args) => {
 				if (failure === "copy" && args[0] === "diff") await writeFile(source, "not a database");
@@ -281,7 +281,7 @@ test("a failed setup stops watching the checkout of an earlier session", async (
 	const { worktree } = await fixture(t);
 	await index(worktree);
 	let fail = false;
-	const run = harness(worktree, { gitProbe: async (args) => fail && args.includes("--absolute-git-dir") ? { code: 1, stdout: "", stderr: "boom", killed: false } : undefined });
+	const run = harness(worktree, { gitProbe: async (args) => fail && args.includes("--absolute-git-dir") ? { code: 1, stdout: "", stderr: "boom", killed: false, truncated: false } : undefined });
 	await run.start();
 	assert.equal(run.servers.size, 1);
 	fail = true;
@@ -310,7 +310,7 @@ test("TUI indexing survives session replacement and replaces its dim animation w
 			entered.resolve();
 			await release.promise;
 			await index(worktree);
-			return { code: 0, stdout: "", stderr: "", killed: false };
+			return { code: 0, stdout: "", stderr: "", killed: false, truncated: false };
 		},
 	});
 	t.after(() => run.shutdown());
@@ -371,7 +371,7 @@ test("shutdown cancels every Git probe without starting more setup work", async 
 			assert.ok(signal);
 			entered.resolve();
 			return new Promise((resolve) => signal.addEventListener("abort", () => {
-				resolve({ code: 0, stdout: "", stderr: "", killed: true });
+				resolve({ code: 0, stdout: "", stderr: "", killed: true, truncated: false });
 			}, { once: true }));
 		} });
 		run.start();
@@ -407,7 +407,7 @@ test("warns with the install command when the CLI is unavailable without creatin
 	const { worktree, lock } = await fixture(t);
 	// Even an existing index still needs a working CLI for codegraph_explore.
 	await index(worktree);
-	const options = { version: { code: 1, stdout: "", stderr: "", killed: false } };
+	const options = { version: { code: 1, stdout: "", stderr: "", killed: false, truncated: false } };
 	const warn = t.mock.method(console, "warn", () => {});
 	const error = t.mock.method(console, "error", () => {});
 	const log = t.mock.method(console, "log", () => {});
@@ -427,7 +427,7 @@ test("warns with the install command when the CLI is unavailable without creatin
 	await headless.start();
 	assert.deepEqual(stderr.mock.calls[0]!.arguments, [`${readDiagnostics().at(-1)!.message}\n`]);
 	assert.equal(warn.mock.callCount(), 0);
-	const timeout = harness(worktree, { version: { code: 0, stdout: "", stderr: "", killed: true } });
+	const timeout = harness(worktree, { version: { code: 0, stdout: "", stderr: "", killed: true, truncated: false } });
 	await timeout.start();
 	assert.match(timeout.notices[0]!.message, /timed out or killed/);
 	assert.equal(timeout.notices[0]!.level, "warning");
@@ -445,7 +445,7 @@ test("serializes simultaneous sessions and does not accept an in-progress partia
 		await index(worktree);
 		entered.resolve();
 		await release.promise;
-		return { code: 0, stdout: "", stderr: "", killed: false };
+		return { code: 0, stdout: "", stderr: "", killed: false, truncated: false };
 	} });
 	const second = harness(worktree, { onStatus: (text) => {
 		if (text?.includes("waiting for index")) waiting.resolve();
@@ -466,7 +466,7 @@ test("failed init preserves its lock, reports recovery, and a later launch rejec
 	await index(primary);
 	const failed = harness(worktree, { init: async () => {
 		await index(worktree);
-		return { code: 1, stderr: "index worker failed", stdout: "", killed: false };
+		return { code: 1, stderr: "index worker failed", stdout: "", killed: false, truncated: false };
 	} });
 	await failed.start();
 	assert.match(failed.notices[0]!.message, /index worker failed/);
@@ -492,8 +492,8 @@ test("missing CLI, killed init, and success without a database all report setup 
 	await index(primary);
 	for (const init of [
 		async () => { throw new Error("spawn codegraph ENOENT"); },
-		async () => ({ code: 0, stdout: "", stderr: "", killed: true }),
-		async () => ({ code: 0, stdout: "", stderr: "", killed: false }),
+		async () => ({ code: 0, stdout: "", stderr: "", killed: true, truncated: false }),
+		async () => ({ code: 0, stdout: "", stderr: "", killed: false, truncated: false }),
 	]) {
 		const run = harness(worktree, { init });
 		await run.start();
@@ -544,7 +544,7 @@ test("codegraph_explore passes the query, file cap, and repository root to the C
 
 test("codegraph_explore surfaces the CLI stderr tail on failure", async (t) => {
 	const repo = await repository(join(await scratch(t), "repo"), true);
-	const run = harness(repo, { explore: { code: 1, stdout: "", stderr: `${"x".repeat(3000)}CodeGraph not initialized\n`, killed: false } });
+	const run = harness(repo, { explore: { code: 1, stdout: "", stderr: `${"x".repeat(3000)}CodeGraph not initialized\n`, killed: false, truncated: false } });
 	await assert.rejects(run.explore({ query: "q" }), (error: Error) => {
 		assert.match(error.message, /^codegraph explore failed \(exit 1\): x+CodeGraph not initialized$/);
 		assert.ok(error.message.length < 2100);
@@ -634,7 +634,7 @@ test("session setup does not read Git messages to find a non-Git directory", asy
 	const base = await scratch(t);
 	// Git prints this text with a German locale.
 	const run = harness(base, { gitProbe: async (args) => args.includes("--show-toplevel")
-		? { code: 128, stdout: "", stderr: "fatal: kein Git-Repository (oder irgendein Elternverzeichnis bis zum Einhängepunkt): .git", killed: false } : undefined });
+		? { code: 128, stdout: "", stderr: "fatal: kein Git-Repository (oder irgendein Elternverzeichnis bis zum Einhängepunkt): .git", killed: false, truncated: false } : undefined });
 	await run.start();
 	assert.deepEqual(run.notices.map(({ level }) => level), ["info"]);
 	assert.equal(run.statuses.at(-1), undefined);

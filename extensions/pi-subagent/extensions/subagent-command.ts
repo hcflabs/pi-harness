@@ -376,7 +376,7 @@ async function choose<T>(ctx: ExtensionContext, title: string, items: readonly C
 			handleInput(data) { list.handleInput(data); tui.requestRender(); },
 			invalidate() { list.invalidate(); },
 		};
-	}, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 0 } });
+	}, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 0 }, blocked: { kind: "question", message: title } });
 }
 
 /** Multi-select on single-choice menus: each pick toggles one row until Continue. Returns chosen values in

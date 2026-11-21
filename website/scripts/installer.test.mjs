@@ -24,7 +24,7 @@ function writeExecutable(path, source) {
 }
 
 function withInstaller(piSource, herdrSource, callback, {
-  piLatest = "1.3.0",
+  piLatest = "1.6.0",
   herdrLatest = "0.9.3",
   extensions,
 } = {}) {
@@ -93,7 +93,7 @@ printf '${name} ${version}\\n'
 `;
 }
 
-const compatiblePi = compatibleTool("pi", "1.3.0");
+const compatiblePi = compatibleTool("pi", "1.6.0");
 const compatibleHerdr = compatibleTool("herdr", "0.9.3");
 const baseHerdr = compatibleTool("herdr", "0.7.4");
 
@@ -176,7 +176,7 @@ test("pi-subagent alone rejects Herdr below 0.9.3", () => {
 
 test("update flag approves available Pi and Herdr updates", () => {
   const names = collectInstallablePackages(repoRoot);
-  const pi = updatableTool("pi", "1.2.0", "1.3.0");
+  const pi = updatableTool("pi", "1.5.0", "1.6.0");
   const herdr = updatableTool("herdr", "0.9.1", "0.9.3");
 
   withInstaller(pi, herdr, ({ commands, runInstaller }) => {
@@ -190,14 +190,14 @@ test("update flag approves available Pi and Herdr updates", () => {
       "herdr --version",
       ...names.map((name) => `pi install npm:${name}`),
     ]);
-  }, { piLatest: "1.3.0", herdrLatest: "0.9.3" });
+  }, { piLatest: "1.6.0", herdrLatest: "0.9.3" });
 });
 
 test("an approved update failure stops before extension installation", () => {
   const pi = `#!/bin/sh
 printf 'pi %s\\n' "$*" >> "$PI_HARNESS_TEST_LOG"
 case "$1" in
-  --version) printf 'pi 1.2.0\\n' ;;
+  --version) printf 'pi 1.5.0\\n' ;;
   update) exit 1 ;;
 esac
 `;
@@ -207,7 +207,7 @@ esac
     assert.equal(result.status, 1);
     assert.match(result.stderr, /Pi update failed/);
     assert.deepEqual(commands(), ["pi --version", "pi update --self"]);
-  }, { piLatest: "1.3.0" });
+  }, { piLatest: "1.6.0" });
 });
 
 test("a skipped Herdr update still enforces the selected 0.9.3 floor", () => {
@@ -242,7 +242,7 @@ test("a broken existing Pi stops before extension installation", () => {
   withInstaller(`#!/bin/sh\nprintf 'pi %s\\n' "$*" >> "$PI_HARNESS_TEST_LOG"\nexit 1\n`, compatibleHerdr, ({ commands, runInstaller }) => {
     const result = runInstaller();
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /could not start.*1\.3\.0\+/);
+    assert.match(result.stderr, /could not start.*1\.6\.0\+/);
     assert.deepEqual(commands(), ["pi --version"]);
   });
 });
@@ -251,16 +251,16 @@ test("an unrecognized existing Pi version stops before extension installation", 
   withInstaller(`#!/bin/sh\nprintf 'pi %s\\n' "$*" >> "$PI_HARNESS_TEST_LOG"\nprintf 'development build\\n'\n`, compatibleHerdr, ({ commands, runInstaller }) => {
     const result = runInstaller();
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /did not report a recognized semantic version.*1\.3\.0\+/);
+    assert.match(result.stderr, /did not report a recognized semantic version.*1\.6\.0\+/);
     assert.deepEqual(commands(), ["pi --version"]);
   });
 });
 
 test("an older existing Pi reports the required version floor", () => {
-  withInstaller(`#!/bin/sh\nprintf 'pi %s\\n' "$*" >> "$PI_HARNESS_TEST_LOG"\nprintf 'pi 1.2.9\\n'\n`, compatibleHerdr, ({ commands, runInstaller }) => {
+  withInstaller(`#!/bin/sh\nprintf 'pi %s\\n' "$*" >> "$PI_HARNESS_TEST_LOG"\nprintf 'pi 1.5.9\\n'\n`, compatibleHerdr, ({ commands, runInstaller }) => {
     const result = runInstaller();
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /Pi 1\.2\.9.*Pi 1\.3\.0\+ is required/);
+    assert.match(result.stderr, /Pi 1\.5\.9.*Pi 1\.6\.0\+ is required/);
     assert.deepEqual(commands(), ["pi --version"]);
   });
 });

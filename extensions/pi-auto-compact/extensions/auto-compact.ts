@@ -321,7 +321,7 @@ export default function (pi: ExtensionAPI) {
 			!Array.isArray(event.message.content) || !event.message.content.some((part) => part.type === "toolCall") ||
 			!event.toolResultEntryIds.length)) return;
 		const session = ctx.sessionManager.getSessionId();
-		const leaf = ctx.sessionManager.getLeafId();
+		const leaf = conversationLeaf(ctx.sessionManager);
 		if (failedBoundary?.session === session && failedBoundary.leaf === leaf) return;
 		if (event.entries.some((entry) => entry.type === "compaction")) return;
 		// A virtual model declares no window; Pi reports the limits of the physical model that answered last.
@@ -418,7 +418,7 @@ export default function (pi: ExtensionAPI) {
 				attempt.finish("aborted", "signal aborted", signal.reason);
 				return;
 			}
-			if (ctx.sessionManager.getSessionId() !== session || ctx.sessionManager.getLeafId() !== leaf) {
+			if (ctx.sessionManager.getSessionId() !== session || conversationLeaf(ctx.sessionManager) !== leaf) {
 				attempt.finish("discarded", "session or branch changed");
 				return;
 			}
@@ -429,7 +429,7 @@ export default function (pi: ExtensionAPI) {
 				firstKeptEntryId: result.firstKeptEntryId, details: result.details, usage: result.usage,
 			}] };
 		} catch (error) {
-			if (ctx.sessionManager.getSessionId() !== session || ctx.sessionManager.getLeafId() !== leaf) {
+			if (ctx.sessionManager.getSessionId() !== session || conversationLeaf(ctx.sessionManager) !== leaf) {
 				attempt.finish("discarded", "session or branch changed", error);
 				return;
 			}
@@ -495,7 +495,7 @@ export default function (pi: ExtensionAPI) {
 			!compactionAbortExpected ||
 			!ctx.signal?.aborted ||
 			message.role !== "assistant" ||
-			message.stopReason !== "error" ||
+			(message.stopReason !== "error" && message.stopReason !== "aborted") ||
 			message.errorMessage !== COMPACTION_ABORT_ERROR ||
 			message.content.some((part) => part.type !== "text" || part.text !== "")
 		) return;
@@ -515,7 +515,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("context_with_system", (event, ctx) => {
 		if (!active || compactionPending || (failedBoundary &&
 			failedBoundary.session === ctx.sessionManager.getSessionId() &&
-			failedBoundary.leaf === ctx.sessionManager.getLeafId())) return;
+			failedBoundary.leaf === conversationLeaf(ctx.sessionManager))) return;
 
 		const contextWindow = ctx.getContextUsage()?.contextWindow ?? ctx.model?.contextWindow ?? 0;
 		const estimatedTokens = contextTokens(event.messages);
@@ -652,4 +652,11 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 	});
+}
+
+/** Leaf ID without trailing usage entries. Pi appends a usage entry for each cache warm. */
+function conversationLeaf(sessionManager: ExtensionContext["sessionManager"]): string | null {
+	let entry = sessionManager.getLeafEntry();
+	while (entry?.type === "usage") entry = entry.parentId ? sessionManager.getEntry(entry.parentId) : undefined;
+	return entry?.id ?? null;
 }

@@ -191,6 +191,25 @@ test("a recap for a leaf that changed during the request is not shown", async ()
 	});
 });
 
+test("a cache warm neither hides a recap nor starts another one", async () => {
+	await withTaskModels(async () => {
+		let resolve!: (value: unknown) => void;
+		const app = harness({ complete: () => new Promise((done) => { resolve = done; }) });
+		const usage = { input: 0, output: 0, cacheRead: 10, cacheWrite: 0, totalTokens: 10, cost: { input: 0, output: 0, cacheRead: 0.01, cacheWrite: 0, total: 0.01 } };
+		app.emit("agent_settled", { aborted: false });
+		await app.idleFor(RECAP_IDLE_MS);
+		app.manager.appendUsage("cache_warm", "test", "model", usage);
+		resolve({ stopReason: "stop", content: [{ type: "text", text: "kept" }] });
+		await flush();
+		assert.equal(app.shown().length, 1);
+
+		app.manager.appendUsage("cache_warm", "test", "model", usage);
+		app.emit("agent_settled", { aborted: false });
+		await app.idleFor(RECAP_IDLE_MS);
+		assert.equal(app.signals.length, 1);
+	});
+});
+
 test("no recap starts without UI or with composer text", async () => {
 	await withTaskModels(async () => {
 		for (const app of [harness({ hasUI: false }), harness({ editorText: "draft" })]) {

@@ -49,7 +49,7 @@ const POLICY = {
 
 type WidgetContent = string[] | ((tui: TUI, theme: Theme) => Component) | undefined;
 const plainTheme = { fg: (_color: string, text: string) => text } as Theme;
-function renderWidget(content: WidgetContent, theme = plainTheme): string[] | undefined {
+function renderWidget(content: WidgetContent, theme = plainTheme): readonly string[] | undefined {
 	return typeof content === "function" ? content({} as TUI, theme).render(200) : content;
 }
 
@@ -439,7 +439,7 @@ test("workspace widget lists every uncleaned workspace with status and agent con
 test("status restores active workspace rows and provides the non-TUI fallback", async () => {
 	const state = structuredClone(PRIVATE_STATE);
 	addWorkspace(state);
-	const widgets: Array<string[] | undefined> = [];
+	const widgets: Array<readonly string[] | undefined> = [];
 	const tuiContext = {
 		cwd: "/repo",
 		hasUI: true,
@@ -561,7 +561,7 @@ test("aborted request keeps mixed task evidence distinct in status and widget", 
 	first.attempts[0]!.prompts[0]!.status = "ambiguous";
 	state.request.tasks.push({ ...state.request.tasks[0]!, id: "unit-two", role: "reviewer" });
 	state.tasks.push({ ...structuredClone(first), taskId: "unit-two", status: "working", failure: undefined });
-	const widgets: Array<string[] | undefined> = [];
+	const widgets: Array<readonly string[] | undefined> = [];
 	const ctx = { cwd: "/repo", hasUI: true,
 		ui: { setWidget: (_key: string, content: WidgetContent) => widgets.push(renderWidget(content)) } } as unknown as ExtensionContext;
 	const harness = createHarness({ responseState: state });
@@ -631,7 +631,7 @@ test("isolated work remains visible before any workspace is allocated", () => {
 });
 
 test("isolated widget caps rows and keeps attention visible", async () => {
-	const widgets: Array<string[] | undefined> = [];
+	const widgets: Array<readonly string[] | undefined> = [];
 	const ctx = { cwd: "/repo", hasUI: true,
 		ui: { setWidget: (_key: string, content: WidgetContent) => widgets.push(renderWidget(content)) } } as unknown as ExtensionContext;
 	const harness = createHarness();
@@ -651,7 +651,7 @@ test("isolated widget caps rows and keeps attention visible", async () => {
 });
 
 test("attention tasks remain visible when aborted summaries exceed the widget cap", async () => {
-	const widgets: Array<string[] | undefined> = [];
+	const widgets: Array<readonly string[] | undefined> = [];
 	const ctx = { cwd: "/repo", hasUI: true,
 		ui: { setWidget: (_key: string, content: WidgetContent) => widgets.push(renderWidget(content)) } } as unknown as ExtensionContext;
 	const harness = createHarness();
@@ -671,7 +671,7 @@ test("inventory refresh restores and clears workspace widget rows from saved sta
 	const state = structuredClone(PRIVATE_STATE);
 	addWorkspace(state);
 	const states = [state];
-	const widgets: Array<string[] | undefined> = [];
+	const widgets: Array<readonly string[] | undefined> = [];
 	const ctx = { cwd: "/repo", hasUI: true,
 		ui: { setWidget: (_key: string, content: WidgetContent) => widgets.push(renderWidget(content)) } } as unknown as ExtensionContext;
 	const harness = createHarness({ inventoryStates: states });
@@ -689,7 +689,7 @@ test("inventory refresh restores and clears workspace widget rows from saved sta
 });
 
 test("saved state updates and clears the workspace widget", async () => {
-	const widgets: Array<string[] | undefined> = [];
+	const widgets: Array<readonly string[] | undefined> = [];
 	const ctx = {
 		cwd: "/repo",
 		hasUI: true,
@@ -1173,7 +1173,7 @@ test("session replacement and shutdown abort old work and suppress stale isolate
 
 test("resume saved before session replacement cannot acknowledge or paint the new session", async () => {
 	const done = deferred<RunResponse>();
-	const widgets: Array<string[] | undefined> = [];
+	const widgets: Array<readonly string[] | undefined> = [];
 	const oldCtx = {
 		...context(CANONICAL_ROOT), hasUI: true,
 		ui: { setWidget: (_key: string, content: WidgetContent) => { widgets.push(renderWidget(content)); } },

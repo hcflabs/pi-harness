@@ -253,7 +253,7 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 		};
 		lastReview = record;
 		const started = performance.now();
-		const leaf = ctx.sessionManager.getLeafId();
+		const leaf = conversationLeaf(ctx.sessionManager);
 		const controller = new AbortController();
 		const timeout = AbortSignal.timeout(REVIEW_TIMEOUT_MS);
 		active = controller;
@@ -261,7 +261,7 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 		// Not awaited: Pi waits for agent_settled handlers before the session counts as idle.
 		void review(ctx, resolved, input, AbortSignal.any([controller.signal, timeout]), record).then((reply) => {
 			record.durationMs = performance.now() - started;
-			if (active !== controller || !ctx.isIdle() || ctx.sessionManager.getLeafId() !== leaf) {
+			if (active !== controller || !ctx.isIdle() || conversationLeaf(ctx.sessionManager) !== leaf) {
 				record.verdict = controller.signal.aborted ? "aborted" : "discarded";
 				return;
 			}
@@ -281,4 +281,11 @@ export default function advisorExtension(pi: ExtensionAPI): void {
 			ctx.ui.setStatus(ADVISOR_ENTRY, undefined);
 		});
 	});
+}
+
+/** Leaf ID without trailing usage entries. Pi appends a usage entry for each cache warm. */
+function conversationLeaf(sessionManager: ExtensionContext["sessionManager"]): string | null {
+	let entry = sessionManager.getLeafEntry();
+	while (entry?.type === "usage") entry = entry.parentId ? sessionManager.getEntry(entry.parentId) : undefined;
+	return entry?.id ?? null;
 }

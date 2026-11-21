@@ -9,7 +9,7 @@ The repository and branch label for the current checkout, with local Git conditi
 _Avoid_: Checkout identity, working-directory path, clean badge
 
 **Usage line**:
-The session's token and cost totals, latest cache-hit rate, response throughput, and current context use, beside the selected model and thinking level. Totals include reported tool usage and completed subagent background work.
+The session's token and cost totals, latest cache-hit rate, response throughput, and current context use, beside the selected model and thinking level. Totals include reported tool usage, prompt cache warms, and completed subagent background work.
 _Avoid_: Token counter, status line
 
 **Response throughput**:

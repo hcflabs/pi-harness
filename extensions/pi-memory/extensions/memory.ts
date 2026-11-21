@@ -485,7 +485,11 @@ async function confirmDream(ctx: ExtensionContext, systemPath: string, old: stri
 					tui.requestRender();
 				},
 			};
-		}, { overlay: true, overlayOptions: { width: "100%", maxHeight: "100%", margin: 0 } });
+		}, {
+			overlay: true,
+			overlayOptions: { width: "100%", maxHeight: "100%", margin: 0 },
+			blocked: { kind: "permission", message: "Review the proposed memory changes" },
+		});
 	} finally {
 		if (onAbort) signal?.removeEventListener("abort", onAbort);
 	}

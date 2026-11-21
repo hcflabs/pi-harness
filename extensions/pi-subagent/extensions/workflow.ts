@@ -2,11 +2,15 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readlink } from "node:fs/promises";
 import { posix } from "node:path";
-import { StringEnum } from "@earendil-works/pi-ai";
 import { DISPLAY_TEXT_CONTRACT } from "@hcflabs/pi-subagent";
 import { PROFILE_NAMES } from "@hcflabs/pi-task-models";
 import { Type, type Static } from "typebox";
 import { Check, Errors } from "typebox/value";
+
+// pi-ai StringEnum returns a pi-schema type, so TypeBox Static cannot infer it.
+function StringEnum<const T extends readonly string[]>(values: T, options: { description?: string } = {}) {
+	return Type.Unsafe<T[number]>({ type: "string", enum: [...values], ...options });
+}
 import { runGit } from "../dist/git-process.js";
 import { ExecuteRequestSchema, parseExecuteRequest, type ExecuteRequest } from "../dist/schema.js";
 

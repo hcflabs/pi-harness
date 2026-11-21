@@ -28,8 +28,16 @@ unavailable, unless an explicit safe non-UI policy authorizes it. Do not use
   context; `appendEntry` stores non-model data. Add a renderer only when useful.
 - Keep rendering synchronous and free of I/O. Bound width with Pi TUI helpers
   and theme tokens; invalidate caches and request rendering after state changes.
-- Respect configured keybindings and expected cancellation. Extend `CustomEditor`,
+  Cache output by width and content (installed `docs/tui.md`: Keep rendering responsive).
+- `render()` returns `readonly string[]`. `Container` returns the same cached
+  array while its children do not change. Copy lines before you change them,
+  also `super.render()` output.
+- Respect configured keybindings and expected cancellation. In renderers, use
+  the injected `keyHint()` and `keyText()` from the render context or options,
+  not the package import. Extend `CustomEditor`,
   forward unowned input, and compose with prior editor factories.
+- When a `custom()` component waits for an answer, pass
+  `blocked: { kind, message }`. Pi then reports the blocked program status.
 - Clear timers and UI state on completion/shutdown. Keep business logic separate
   so non-interactive modes remain functional.
 - Test the affected mode: RPC startup does not verify TUI layout, keyboard input,

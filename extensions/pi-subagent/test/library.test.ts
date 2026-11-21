@@ -602,7 +602,7 @@ test("Role MCP allowlists load the native MCP extension with direct exposure onl
 		[{ url: "https://docs.test", description: 42 }, /field "description" must be a string\./],
 		[{ url: "http://docs.test/mcp", auth: { provider: "radius" } }, /field "auth" requires "url" to use https, or http on localhost, 127\.0\.0\.1, or \[::1\]\./],
 		[{ url: "https://docs.test", oauth: { clientName: " " } }, /field "oauth\.clientName" must be a non-empty string\./],
-		[{ url: "https://docs.test", oauth: { clientRegistration: "unknown" } }, /field "oauth\.clientRegistration" must be "dcr" or "cimd"/],
+		[{ url: "https://docs.test", oauth: { clientRegistration: "unknown" } }, /field "oauth\.clientRegistration" must be "auto", "dcr", or "cimd"/],
 		[{ url: "https://docs.test", oauth: { clientRegistration: "cimd", clientId: "custom" } }, /cannot be combined/],
 		[{ url: "https://docs.test", oauth: { clientRegistration: "cimd", clientName: "custom" } }, /cannot be combined/],
 		[{ url: "https://docs.test", oauth: { clientRegistration: "cimd", callbackUrl: "http://[::1]:8080/callback" } }, /requires "oauth\.callbackUrl" on localhost or 127\.0\.0\.1 with path \/callback/],
@@ -617,7 +617,7 @@ test("Role MCP allowlists load the native MCP extension with direct exposure onl
 	const secure = { url: "https://docs.test/mcp", description: "Product docs", auth: { provider: "radius" } };
 	const loopback = { url: "http://[::1]:8080/mcp", auth: { provider: "radius" } };
 	const oauth = { url: "https://mcp.example.test/mcp", oauth: { clientName: "Claude Code", authServerMetadataUrl: "https://idp.test/.well-known/openid-configuration" } };
-	for (const clientRegistration of ["dcr", "cimd"]) {
+	for (const clientRegistration of ["auto", "dcr", "cimd"]) {
 		const config = { url: "https://docs.test", oauth: { clientRegistration, callbackUrl: "http://127.0.0.1:8080/callback", callbackPort: 8080 } };
 		await writeFile(mcpPath, JSON.stringify({ mcpServers: { docs: config } }));
 		assert.deepEqual(loadRoleMcpConfig(agentDir, ["docs"]).servers[0]!.config, { ...config, exposure: "direct" });
